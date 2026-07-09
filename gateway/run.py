@@ -6129,6 +6129,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # inherits the gateway marker, `hermes gateway restart` refuses to
             # run as a self-restart loop guard and the gateway stays stopped.
             watcher_env.pop("_HERMES_GATEWAY", None)
+            # If the watcher fires while the old gateway is still alive, the
+            # helper process is still a descendant of that gateway. Bypass the
+            # ancestor self-restart shortcut so `hermes gateway restart` starts
+            # a replacement instead of signalling the already-stopping parent.
+            watcher_env["HERMES_GATEWAY_DISABLE_SELF_RESTART"] = "1"
             project_root = Path(__file__).resolve().parent.parent
             watcher_python = sys.executable
             try:
@@ -6173,6 +6178,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # gateway stops and never comes back.
         watcher_env = os.environ.copy()
         watcher_env.pop("_HERMES_GATEWAY", None)
+        # The detached helper may fire while the old gateway is still alive but
+        # wedged in shutdown. In that case the helper remains a descendant of
+        # the old PID, and the CLI's ancestor self-restart guard would otherwise
+        # send SIGUSR1 back to the already-stopping process and exit without
+        # bringing up a replacement. Force the helper down the external restart
+        # path instead.
+        watcher_env["HERMES_GATEWAY_DISABLE_SELF_RESTART"] = "1"
         setsid_bin = shutil.which("setsid")
         if setsid_bin:
             subprocess.Popen(
@@ -7965,6 +7977,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 except Exception as _e:
                     logger.debug("cleanup_all_browsers (%s) error: %s", phase, _e)
 
+            async def _kill_tool_subprocesses_bounded(phase: str) -> None:
+                """Run process/env/browser cleanup with a hard shutdown budget.
+
+                cleanup_all_environments() can block inside backend teardown. If
+                that happens during /restart, the gateway has already dropped
+                Telegram but never exits, so launchd/systemd cannot relaunch it.
+                Run cleanup off-loop and continue after a bounded wait; main()
+                uses os._exit after graceful teardown, so any stuck cleanup
+                worker cannot keep the process alive once we reach the end.
+                """
+                raw_timeout = os.getenv("HERMES_GATEWAY_TOOL_CLEANUP_TIMEOUT", "10")
+                try:
+                    timeout = max(0.1, float(raw_timeout))
+                except ValueError:
+                    timeout = 10.0
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(_kill_tool_subprocesses, phase),
+                        timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Shutdown (%s): tool cleanup exceeded %.1fs; continuing so the gateway can exit/restart",
+                        phase,
+                        timeout,
+                    )
+
             logger.info(
                 "Stopping gateway%s...",
                 " for restart" if self._restart_requested else "",
@@ -8086,7 +8125,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # children left behind by an interrupted terminal tool get
                 # killed by systemd instead of us (issue #8202).  The final
                 # catch-all cleanup below still runs for the graceful path.
-                _kill_tool_subprocesses("post-interrupt")
+                await _kill_tool_subprocesses_bounded("post-interrupt")
                 logger.info(
                     "Shutdown phase: post-interrupt tool kill done at +%.2fs",
                     _phase_elapsed(),
@@ -8171,7 +8210,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # where drain succeeded without interrupt, and (b) anything
             # that got respawned between the earlier call and adapter
             # disconnect (defense in depth; safe to call repeatedly).
-            _kill_tool_subprocesses("final-cleanup")
+            await _kill_tool_subprocesses_bounded("final-cleanup")
             logger.info(
                 "Shutdown phase: final-cleanup tool kill done at +%.2fs",
                 _phase_elapsed(),

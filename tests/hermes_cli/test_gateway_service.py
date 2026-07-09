@@ -887,6 +887,14 @@ class TestLaunchdServiceRecovery:
         assert calls == [("self", 321)]
         assert "restart requested" in capsys.readouterr().out.lower()
 
+    def test_self_restart_can_be_disabled_for_detached_helper(self, monkeypatch):
+        monkeypatch.setenv("HERMES_GATEWAY_DISABLE_SELF_RESTART", "1")
+        monkeypatch.setattr(
+            gateway_cli, "_is_pid_ancestor_of_current_process", lambda pid: True
+        )
+
+        assert gateway_cli._request_gateway_self_restart(321) is False
+
     def test_launchd_stop_uses_bootout_not_kill(self, monkeypatch):
         """launchd_stop must bootout the service so KeepAlive doesn't respawn it."""
         label = gateway_cli.get_launchd_label()

@@ -369,6 +369,34 @@ async def test_gateway_stop_kills_tool_subprocesses_on_graceful_path(monkeypatch
     assert kill_count == 1
 
 
+@pytest.mark.asyncio
+async def test_gateway_stop_tool_cleanup_timeout_does_not_block_restart(monkeypatch):
+    """A hung terminal environment cleanup must not strand /restart after
+    adapters disconnect; shutdown continues after the configured small budget."""
+    runner, adapter = make_restart_runner()
+    adapter.disconnect = AsyncMock()
+    monkeypatch.setenv("HERMES_GATEWAY_TOOL_CLEANUP_TIMEOUT", "0.05")
+
+    def _slow_cleanup_envs():
+        import time
+        time.sleep(0.25)
+
+    import tools.process_registry as _pr
+    import tools.terminal_tool as _tt
+    import tools.browser_tool as _bt
+    monkeypatch.setattr(_pr.process_registry, "kill_all", lambda task_id=None: 0)
+    monkeypatch.setattr(_tt, "cleanup_all_environments", _slow_cleanup_envs)
+    monkeypatch.setattr(_bt, "cleanup_all_browsers", lambda: None)
+
+    started = asyncio.get_running_loop().time()
+    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+        await runner.stop(restart=True, service_restart=True)
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 0.20
+    assert runner.exit_code == GATEWAY_SERVICE_RESTART_EXIT_CODE
+
+
 # ---------------------------------------------------------------------------
 # gateway_state persistence on shutdown (issue #42675)
 #
