@@ -1783,6 +1783,9 @@ from gateway.whatsapp_identity import (
 
 logger = logging.getLogger(__name__)
 
+# Shutdown must keep moving even when a backend cleanup call wedges.
+GATEWAY_TOOL_CLEANUP_TIMEOUT_SECONDS = 10.0
+
 
 _OWN_POLICY_OPEN_ENV = {
     Platform.WECOM: ("WECOM_DM_POLICY", "WECOM_GROUP_POLICY", "WECOM_ALLOW_ALL_USERS"),
@@ -7977,31 +7980,58 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 except Exception as _e:
                     logger.debug("cleanup_all_browsers (%s) error: %s", phase, _e)
 
+            cleanup_thread: Optional[threading.Thread] = None
+            cleanup_done: Optional[asyncio.Event] = None
+
             async def _kill_tool_subprocesses_bounded(phase: str) -> None:
                 """Run process/env/browser cleanup with a hard shutdown budget.
 
                 cleanup_all_environments() can block inside backend teardown. If
                 that happens during /restart, the gateway has already dropped
                 Telegram but never exits, so launchd/systemd cannot relaunch it.
-                Run cleanup off-loop and continue after a bounded wait; main()
-                uses os._exit after graceful teardown, so any stuck cleanup
-                worker cannot keep the process alive once we reach the end.
+                Use a dedicated daemon thread instead of asyncio.to_thread():
+                asyncio.run() waits for the default executor during loop close,
+                which would defeat the timeout before main() reaches os._exit.
                 """
-                raw_timeout = os.getenv("HERMES_GATEWAY_TOOL_CLEANUP_TIMEOUT", "10")
-                try:
-                    timeout = max(0.1, float(raw_timeout))
-                except ValueError:
-                    timeout = 10.0
+                nonlocal cleanup_thread, cleanup_done
+                if cleanup_thread is not None and cleanup_thread.is_alive():
+                    logger.warning(
+                        "Shutdown (%s): prior tool cleanup is still running; "
+                        "skipping overlapping cleanup",
+                        phase,
+                    )
+                    return
+
+                loop = asyncio.get_running_loop()
+                cleanup_done = asyncio.Event()
+                done_event = cleanup_done
+
+                def _cleanup_worker() -> None:
+                    try:
+                        _kill_tool_subprocesses(phase)
+                    finally:
+                        try:
+                            loop.call_soon_threadsafe(done_event.set)
+                        except RuntimeError:
+                            # The loop may already be closed after a timeout.
+                            pass
+
+                cleanup_thread = threading.Thread(
+                    target=_cleanup_worker,
+                    name=f"hermes-gateway-shutdown-cleanup-{phase}",
+                    daemon=True,
+                )
+                cleanup_thread.start()
                 try:
                     await asyncio.wait_for(
-                        asyncio.to_thread(_kill_tool_subprocesses, phase),
-                        timeout=timeout,
+                        cleanup_done.wait(),
+                        timeout=GATEWAY_TOOL_CLEANUP_TIMEOUT_SECONDS,
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
                         "Shutdown (%s): tool cleanup exceeded %.1fs; continuing so the gateway can exit/restart",
                         phase,
-                        timeout,
+                        GATEWAY_TOOL_CLEANUP_TIMEOUT_SECONDS,
                     )
 
             logger.info(

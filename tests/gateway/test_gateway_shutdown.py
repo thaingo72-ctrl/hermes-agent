@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -375,11 +376,14 @@ async def test_gateway_stop_tool_cleanup_timeout_does_not_block_restart(monkeypa
     adapters disconnect; shutdown continues after the configured small budget."""
     runner, adapter = make_restart_runner()
     adapter.disconnect = AsyncMock()
-    monkeypatch.setenv("HERMES_GATEWAY_TOOL_CLEANUP_TIMEOUT", "0.05")
+    monkeypatch.setattr(gateway_run, "GATEWAY_TOOL_CLEANUP_TIMEOUT_SECONDS", 0.05)
+
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
 
     def _slow_cleanup_envs():
-        import time
-        time.sleep(0.25)
+        cleanup_started.set()
+        release_cleanup.wait(timeout=1.0)
 
     import tools.process_registry as _pr
     import tools.terminal_tool as _tt
@@ -395,6 +399,15 @@ async def test_gateway_stop_tool_cleanup_timeout_does_not_block_restart(monkeypa
 
     assert elapsed < 0.20
     assert runner.exit_code == GATEWAY_SERVICE_RESTART_EXIT_CODE
+    assert cleanup_started.is_set()
+    cleanup_threads = [
+        thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("hermes-gateway-shutdown-cleanup")
+    ]
+    assert cleanup_threads
+    assert all(thread.daemon for thread in cleanup_threads)
+    release_cleanup.set()
 
 
 # ---------------------------------------------------------------------------
