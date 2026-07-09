@@ -410,6 +410,114 @@ async def test_gateway_stop_tool_cleanup_timeout_does_not_block_restart(monkeypa
     release_cleanup.set()
 
 
+@pytest.mark.asyncio
+async def test_gateway_stop_continues_when_cleanup_thread_cannot_start(
+    tmp_path, monkeypatch
+):
+    """Thread resource exhaustion must not abort shutdown or lose exit 75."""
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    runner, adapter = make_restart_runner()
+    adapter.disconnect = AsyncMock()
+    monkeypatch.setattr(
+        gateway_run.threading.Thread,
+        "start",
+        MagicMock(side_effect=RuntimeError("cannot start new thread")),
+    )
+
+    with patch("gateway.status.remove_pid_file"), patch(
+        "gateway.status.write_runtime_status"
+    ):
+        await runner.stop(restart=True, service_restart=True)
+
+    assert runner._shutdown_event.is_set()
+    assert runner.exit_code == GATEWAY_SERVICE_RESTART_EXIT_CODE
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_publishes_shutdown_only_after_final_cleanup(monkeypatch):
+    """The outer lifecycle must not resume while teardown still awaits cleanup."""
+    runner, adapter = make_restart_runner()
+    adapter.disconnect = AsyncMock()
+    monkeypatch.setattr(gateway_run, "GATEWAY_TOOL_CLEANUP_TIMEOUT_SECONDS", 1.0)
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+
+    def _blocking_cleanup_envs():
+        cleanup_started.set()
+        release_cleanup.wait(timeout=1.0)
+
+    import tools.process_registry as _pr
+    import tools.terminal_tool as _tt
+    import tools.browser_tool as _bt
+
+    monkeypatch.setattr(_pr.process_registry, "kill_all", lambda task_id=None: 0)
+    monkeypatch.setattr(_tt, "cleanup_all_environments", _blocking_cleanup_envs)
+    monkeypatch.setattr(_bt, "cleanup_all_browsers", lambda: None)
+
+    with patch("gateway.status.remove_pid_file"), patch(
+        "gateway.status.write_runtime_status"
+    ):
+        stop_task = asyncio.create_task(runner.stop())
+        try:
+            for _ in range(100):
+                if cleanup_started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert cleanup_started.is_set()
+            assert not runner._shutdown_event.is_set()
+        finally:
+            release_cleanup.set()
+        await stop_task
+
+    assert runner._shutdown_event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_does_not_overlap_cleanup_after_drain_timeout(monkeypatch):
+    """A timed-out post-interrupt worker must not be duplicated at final cleanup."""
+    runner, adapter = make_restart_runner()
+    adapter.disconnect = AsyncMock()
+    runner._restart_drain_timeout = 0.0
+    runner._running_agents = {"session": MagicMock()}
+    monkeypatch.setattr(gateway_run, "GATEWAY_TOOL_CLEANUP_TIMEOUT_SECONDS", 0.05)
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    cleanup_calls = 0
+
+    def _blocking_cleanup_envs():
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        cleanup_started.set()
+        release_cleanup.wait(timeout=1.0)
+
+    def _interrupt_and_clear(_reason):
+        runner._running_agents.clear()
+
+    monkeypatch.setattr(runner, "_interrupt_running_agents", _interrupt_and_clear)
+
+    import tools.process_registry as _pr
+    import tools.terminal_tool as _tt
+    import tools.browser_tool as _bt
+
+    monkeypatch.setattr(_pr.process_registry, "kill_all", lambda task_id=None: 0)
+    monkeypatch.setattr(_tt, "cleanup_all_environments", _blocking_cleanup_envs)
+    monkeypatch.setattr(_bt, "cleanup_all_browsers", lambda: None)
+
+    try:
+        with patch("gateway.status.remove_pid_file"), patch(
+            "gateway.status.write_runtime_status"
+        ):
+            await runner.stop(restart=True, service_restart=True)
+        assert cleanup_started.is_set()
+        assert cleanup_calls == 1
+        assert runner.exit_code == GATEWAY_SERVICE_RESTART_EXIT_CODE
+    finally:
+        release_cleanup.set()
+        for thread in threading.enumerate():
+            if thread.name.startswith("hermes-gateway-shutdown-cleanup"):
+                thread.join(timeout=1.0)
+
+
 # ---------------------------------------------------------------------------
 # gateway_state persistence on shutdown (issue #42675)
 #
