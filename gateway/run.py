@@ -8268,7 +8268,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     name=f"hermes-gateway-shutdown-cleanup-{phase}",
                     daemon=True,
                 )
-                cleanup_thread.start()
+                try:
+                    cleanup_thread.start()
+                except Exception as exc:
+                    logger.warning(
+                        "Shutdown (%s): could not start bounded tool cleanup; "
+                        "continuing without it: %s",
+                        phase,
+                        exc,
+                    )
+                    cleanup_thread = None
+                    cleanup_done = None
+                    return
                 try:
                     await asyncio.wait_for(
                         cleanup_done.wait(),
@@ -8490,8 +8501,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._pending_approvals.clear()
             if hasattr(self, '_busy_ack_ts'):
                 self._busy_ack_ts.clear()
-            self._shutdown_event.set()
-
             # Global cleanup: kill any remaining tool subprocesses not tied
             # to a specific agent (catch-all for zombie prevention). On the
             # drain-timeout path we already did this earlier after agent
@@ -8641,6 +8650,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             else:
                 self._update_runtime_status("stopped", self._exit_reason)
             logger.info("Gateway stopped (total teardown %.2fs)", _phase_elapsed())
+            # Publish shutdown only after every awaited teardown phase and all
+            # exit/runtime state updates are complete. Setting this before the
+            # final cleanup await lets start_gateway() race ahead and cancel
+            # this stop task during asyncio.run() shutdown.
+            self._shutdown_event.set()
 
         self._stop_task = asyncio.create_task(_stop_impl())
         await self._stop_task
