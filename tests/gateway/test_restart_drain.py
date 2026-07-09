@@ -272,6 +272,11 @@ async def test_launch_detached_restart_command_uses_setsid(monkeypatch):
     # The watcher must NOT inherit the gateway marker, or the CLI's
     # self-restart loop guard refuses to run `hermes gateway restart`.
     assert kwargs["env"].get("_HERMES_GATEWAY") is None
+    # The watcher must also bypass ancestor self-restart: if the old gateway
+    # is wedged past the wait deadline, the helper is still its descendant and
+    # would otherwise SIGUSR1 the already-stopping process instead of starting
+    # a replacement.
+    assert kwargs["env"].get("HERMES_GATEWAY_DISABLE_SELF_RESTART") == "1"
 
 
 @pytest.mark.asyncio
@@ -347,6 +352,7 @@ async def test_windows_detached_restart_scrubs_gateway_marker(monkeypatch, tmp_p
     cmd, kwargs = popen_calls[0]
     assert cmd[-3:] == ["hermes", "gateway", "restart"]
     assert kwargs["env"].get("_HERMES_GATEWAY") is None
+    assert kwargs["env"].get("HERMES_GATEWAY_DISABLE_SELF_RESTART") == "1"
     assert kwargs["env"]["VIRTUAL_ENV"] == str(venv_dir)
     assert str(site_packages) in kwargs["env"]["PYTHONPATH"].split(gateway_run.os.pathsep)
     assert kwargs["stdout"] is subprocess.DEVNULL
