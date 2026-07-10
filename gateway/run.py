@@ -8512,37 +8512,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 self._exit_reason = self._exit_reason or "Gateway restart requested"
 
             self._draining = False
-            # Persist the terminal gateway_state. The default is "stopped",
-            # but when this teardown was triggered by an UNEXPECTED external
-            # signal (container/s6 SIGTERM on `docker restart` or image
-            # upgrade, OOM-killer, bare `kill`) we instead persist "running"
-            # to preserve the operator's run-intent across the restart.
-            #
-            # On Docker (s6-overlay), container_boot.py reads gateway_state
-            # on the next boot and only auto-starts gateways whose last
-            # state was "running" (_AUTOSTART_STATES). Persisting "stopped"
-            # — or leaving the mid-shutdown "draining" marker in place — for
-            # a routine `docker compose up --force-recreate` permanently
-            # suppresses auto-start, so the messaging channels silently stay
-            # dark until the operator manually restarts (issue #42675).
-            #
-            # An operator-initiated stop (`hermes gateway stop`,
-            # systemd/launchd ExecStop, the s6 stop path, Ctrl+C) writes a
-            # planned-stop marker BEFORE signalling, so it is classified as
-            # a planned stop (not signal-initiated) and correctly persists
-            # "stopped" — respecting the explicit intent. A restart also
-            # persists "stopped" here; the restarting process brings the
-            # gateway back up itself.
-            if getattr(self, "_signal_initiated_shutdown", False) and not self._restart_requested:
+            _publish_terminal_runtime_state()
+            logger.info("Gateway stopped (total teardown %.2fs)", _phase_elapsed())
+
+        def _publish_terminal_runtime_state() -> None:
+            """Persist a non-draining state after teardown completes or fails.
+
+            The default is ``stopped``. For an unexpected external signal,
+            preserve ``running`` as the operator's run-intent so container
+            supervisors auto-start the gateway on the next boot.
+            """
+            signal_restart_intent = (
+                getattr(self, "_signal_initiated_shutdown", False)
+                and not self._restart_requested
+            )
+            terminal_state = "running" if signal_restart_intent else "stopped"
+            self._update_runtime_status(terminal_state, self._exit_reason)
+            if signal_restart_intent:
                 logger.info(
                     "Gateway stopped by an unexpected signal — persisting "
                     "gateway_state=running so container_boot auto-starts on "
                     "the next boot (issue #42675)"
                 )
-                self._update_runtime_status("running", self._exit_reason)
-            else:
-                self._update_runtime_status("stopped", self._exit_reason)
-            logger.info("Gateway stopped (total teardown %.2fs)", _phase_elapsed())
 
         async def _stop_impl_with_completion() -> None:
             try:
@@ -8555,6 +8546,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         else 1
                     )
                 self._exit_reason = self._exit_reason or f"Gateway teardown failed: {exc}"
+                _publish_terminal_runtime_state()
                 logger.exception("Gateway teardown failed before clean completion")
                 raise
             finally:

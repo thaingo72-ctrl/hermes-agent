@@ -96,6 +96,8 @@ async def test_gateway_stop_interrupts_running_agents_and_cancels_adapter_tasks(
 async def test_gateway_stop_teardown_failure_unblocks_shutdown_with_failure_code():
     runner, adapter = make_restart_runner()
     adapter.disconnect = AsyncMock()
+    update_runtime_status = MagicMock()
+    runner._update_runtime_status = update_runtime_status
 
     with (
         patch("gateway.status.remove_pid_file"),
@@ -111,6 +113,9 @@ async def test_gateway_stop_teardown_failure_unblocks_shutdown_with_failure_code
 
     assert runner._shutdown_event.is_set() is True
     assert runner._exit_code == 1
+    terminal_status = update_runtime_status.call_args_list[-1].args
+    assert terminal_status[0] == "stopped"
+    assert "executor shutdown failed" in terminal_status[1]
 
 
 @pytest.mark.asyncio
