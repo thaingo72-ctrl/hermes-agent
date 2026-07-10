@@ -4489,6 +4489,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.debug("goal continuation: active-state recheck failed: %s", exc)
             return False
 
+    def _adapter_active_session_count(self) -> int:
+        """Count end-to-end adapter turns, including final response delivery."""
+        adapters = list(getattr(self, "adapters", {}).values())
+        for profile_adapters in getattr(self, "_profile_adapters", {}).values():
+            adapters.extend(profile_adapters.values())
+        seen: set[int] = set()
+        count = 0
+        for adapter in adapters:
+            identity = id(adapter)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            sessions = getattr(adapter, "_active_sessions", None)
+            if isinstance(sessions, dict):
+                count += len(sessions)
+        return count
+
+    def _active_turn_count(self) -> int:
+        # The same turn normally appears in both maps during model execution,
+        # so use max rather than sum. Adapter guards outlive model slots through
+        # final delivery and therefore keep the count non-zero until send ends.
+        return max(self._running_agent_count(), self._adapter_active_session_count())
+
     def _update_runtime_status(self, gateway_state: Optional[str] = None, exit_reason: Optional[str] = None) -> None:
         try:
             from gateway.status import write_runtime_status
@@ -4496,7 +4519,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 gateway_state=gateway_state,
                 exit_reason=exit_reason,
                 restart_requested=self._restart_requested,
-                active_agents=self._running_agent_count(),
+                active_agents=self._active_turn_count(),
             )
         except Exception:
             pass
@@ -4519,7 +4542,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(active_agents=self._running_agent_count())
+            write_runtime_status(active_agents=self._active_turn_count())
         except Exception:
             pass
 
@@ -5726,13 +5749,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         restart_source = self._restart_command_source if self._restart_requested else None
 
         action = "restarting" if self._restart_requested else "shutting down"
-        hint = (
+        active_hint = (
             "Your current task will be interrupted. "
             "Send any message after restart and I'll try to resume where you left off."
             if self._restart_requested
             else "Your current task will be interrupted."
         )
-        msg = f"⚠️ Gateway {action} — {hint}"
+        active_msg = f"⚠️ Gateway {action} — {active_hint}"
+        if active:
+            home_msg = (
+                f"⚠️ Gateway {action} — {len(active)} active task(s) may be interrupted."
+            )
+        elif self._restart_requested:
+            home_msg = "⚠️ Gateway restarting — Brief disconnect expected."
+        else:
+            home_msg = "⚠️ Gateway shutting down."
 
         notified: set[tuple[str, str, Optional[str]]] = set()
         for session_key in active:
@@ -5807,7 +5838,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter=adapter,
                 )
 
-                result = await adapter.send(chat_id, msg, metadata=metadata)
+                result = await adapter.send(chat_id, active_msg, metadata=metadata)
                 if result is not None and getattr(result, "success", True) is False:
                     logger.debug(
                         "Failed to send shutdown notification to %s:%s: %s",
@@ -5888,9 +5919,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter=adapter,
                 )
                 if metadata:
-                    result = await adapter.send(str(home.chat_id), msg, metadata=metadata)
+                    result = await adapter.send(str(home.chat_id), home_msg, metadata=metadata)
                 else:
-                    result = await adapter.send(str(home.chat_id), msg)
+                    result = await adapter.send(str(home.chat_id), home_msg)
                 if result is not None and getattr(result, "success", True) is False:
                     logger.debug(
                         "Failed to send shutdown notification to home channel %s:%s: %s",
@@ -7077,6 +7108,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             
             # Set up message + fatal error handlers
             adapter.set_message_handler(self._handle_message)
+            adapter.set_activity_change_handler(self._persist_active_agents)
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
@@ -7913,6 +7945,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         continue
 
                     adapter.set_message_handler(self._handle_message)
+                    adapter.set_activity_change_handler(self._persist_active_agents)
                     adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
                     adapter.set_session_store(self.session_store)
                     adapter.set_busy_session_handler(self._handle_active_session_busy_message)
@@ -8695,6 +8728,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter.set_message_handler(
                 self._make_profile_message_handler(profile_name)
             )
+            adapter.set_activity_change_handler(self._persist_active_agents)
             adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             adapter.set_session_store(self.session_store)
             adapter.set_busy_session_handler(self._handle_active_session_busy_message)
