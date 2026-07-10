@@ -237,6 +237,9 @@ class TestSystemdServiceRefresh:
             return True
 
         monkeypatch.setattr("gateway.run.start_gateway", fake_start_gateway)
+        monkeypatch.setattr(
+            "gateway.run._exit_after_graceful_shutdown", lambda _code: None
+        )
 
         gateway_cli.run_gateway()
 

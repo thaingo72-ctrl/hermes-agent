@@ -93,6 +93,27 @@ async def test_gateway_stop_interrupts_running_agents_and_cancels_adapter_tasks(
 
 
 @pytest.mark.asyncio
+async def test_gateway_stop_teardown_failure_unblocks_shutdown_with_failure_code():
+    runner, adapter = make_restart_runner()
+    adapter.disconnect = AsyncMock()
+
+    with (
+        patch("gateway.status.remove_pid_file"),
+        patch("gateway.status.write_runtime_status"),
+        patch.object(
+            gateway_run.GatewayRunner,
+            "_shutdown_executor",
+            side_effect=RuntimeError("executor shutdown failed"),
+        ),
+        pytest.raises(RuntimeError, match="executor shutdown failed"),
+    ):
+        await runner.stop()
+
+    assert runner._shutdown_event.is_set() is True
+    assert runner._exit_code == 1
+
+
+@pytest.mark.asyncio
 async def test_gateway_stop_drains_running_agents_before_disconnect():
     runner, adapter = make_restart_runner()
     # Opt into a grace window (the default is 0 = interrupt immediately).

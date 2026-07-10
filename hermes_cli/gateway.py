@@ -4717,6 +4717,11 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         force: Skip the supervised-gateway conflict guard and start even when a
                systemd/launchd service is already supervising this profile.
     """
+    # Internal restart helpers set this marker only to bypass ancestor routing
+    # while dispatching the replacement. It must not become sticky runtime
+    # state in the replacement gateway or leak to future child CLI commands.
+    os.environ.pop("HERMES_GATEWAY_DISABLE_SELF_RESTART", None)
+
     _guard_official_docker_root_gateway()
     _guard_named_profile_under_multiplexer(force=force)
     _guard_supervised_gateway_conflict(force=force)
@@ -4777,7 +4782,7 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         except Exception:
             pass  # best-effort; don't block gateway startup
 
-    from gateway.run import start_gateway
+    from gateway.run import _exit_after_graceful_shutdown, start_gateway
 
     print("┌─────────────────────────────────────────────────────────┐")
     print("│           ⚕ Hermes Gateway Starting...                 │")
@@ -4854,6 +4859,7 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
             traceback=_traceback.format_exc(),
         )
         print("\nGateway stopped.")
+        _exit_after_graceful_shutdown(0)
         return
     except SystemExit as e:
         _exit_diag(
@@ -4861,21 +4867,34 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
             code=getattr(e, "code", None),
             traceback=_traceback.format_exc(),
         )
-        raise
+        if e.code is None:
+            exit_code = 0
+        elif isinstance(e.code, int):
+            exit_code = e.code
+        else:
+            exit_code = 1
+        _exit_after_graceful_shutdown(exit_code)
+        return
     except BaseException as e:
         # Absolutely everything else: Exception, asyncio.CancelledError,
-        # even exotic BaseException subclasses. We want the cause logged.
-        _exit_diag(
-            "asyncio.run.exception",
-            exc_type=type(e).__name__,
-            exc_repr=repr(e),
-            traceback=_traceback.format_exc(),
-        )
-        raise
+        # even exotic BaseException subclasses. Diagnostics are best-effort;
+        # the hard-exit backstop must run even if diagnostic I/O is unusable.
+        try:
+            _exit_diag(
+                "asyncio.run.exception",
+                exc_type=type(e).__name__,
+                exc_repr=repr(e),
+                traceback=_traceback.format_exc(),
+            )
+        finally:
+            _exit_after_graceful_shutdown(1)
+        return
     if not success:
         _exit_diag("gateway.exit_nonzero")
-        sys.exit(1)
+        _exit_after_graceful_shutdown(1)
+        return
     _exit_diag("gateway.exit_clean")
+    _exit_after_graceful_shutdown(0)
 
 
 # =============================================================================

@@ -8650,13 +8650,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             else:
                 self._update_runtime_status("stopped", self._exit_reason)
             logger.info("Gateway stopped (total teardown %.2fs)", _phase_elapsed())
-            # Publish shutdown only after every awaited teardown phase and all
-            # exit/runtime state updates are complete. Setting this before the
-            # final cleanup await lets start_gateway() race ahead and cancel
-            # this stop task during asyncio.run() shutdown.
-            self._shutdown_event.set()
 
-        self._stop_task = asyncio.create_task(_stop_impl())
+        async def _stop_impl_with_completion() -> None:
+            try:
+                await _stop_impl()
+            except BaseException as exc:
+                if self._exit_code is None:
+                    self._exit_code = (
+                        GATEWAY_SERVICE_RESTART_EXIT_CODE
+                        if self._restart_requested and self._restart_via_service
+                        else 1
+                    )
+                self._exit_reason = self._exit_reason or f"Gateway teardown failed: {exc}"
+                logger.exception("Gateway teardown failed before clean completion")
+                raise
+            finally:
+                self._draining = False
+                # Publish only after _stop_impl either completes every teardown
+                # phase or records a terminal failure. This keeps start_gateway
+                # from hanging forever on an exceptional shutdown path.
+                self._shutdown_event.set()
+
+        self._stop_task = asyncio.create_task(_stop_impl_with_completion())
         await self._stop_task
 
     async def wait_for_shutdown(self) -> None:
