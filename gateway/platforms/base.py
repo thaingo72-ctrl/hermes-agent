@@ -2357,6 +2357,10 @@ class BasePlatformAdapter(ABC):
         self.config = config
         self.platform = platform
         self._message_handler: Optional[MessageHandler] = None
+        # Synchronous callback registered by GatewayRunner. It fires only when
+        # the adapter-level active-session count changes, so persisted activity
+        # covers the full receive → model → final-delivery lifecycle.
+        self._activity_change_handler: Optional[Callable[[], None]] = None
         # Optional hook (e.g. Telegram DM topic recovery) that rewrites
         # ``event.source.thread_id`` before session keying. Returns the
         # corrected thread_id or None to leave the source untouched.
@@ -2804,6 +2808,27 @@ class BasePlatformAdapter(ABC):
         an optional response string.
         """
         self._message_handler = handler
+
+    def set_activity_change_handler(
+        self, handler: Optional[Callable[[], None]]
+    ) -> None:
+        """Register a best-effort callback for active-session count changes."""
+        self._activity_change_handler = handler
+
+    def _notify_activity_change(self) -> None:
+        handler = getattr(self, "_activity_change_handler", None)
+        if not callable(handler):
+            return
+        try:
+            handler()
+        except Exception:
+            logger.debug("[%s] activity-change callback failed", self.name, exc_info=True)
+
+    def _set_session_guard(self, session_key: str, guard: asyncio.Event) -> None:
+        was_active = session_key in self._active_sessions
+        self._active_sessions[session_key] = guard
+        if not was_active:
+            self._notify_activity_change()
 
     def set_topic_recovery_fn(
         self,
@@ -4415,6 +4440,7 @@ class BasePlatformAdapter(ABC):
         if guard is not None and current_guard is not guard:
             return
         del self._active_sessions[session_key]
+        self._notify_activity_change()
 
     def _session_task_is_stale(self, session_key: str) -> bool:
         """Return True if the owner task for ``session_key`` is done/cancelled.
@@ -4454,7 +4480,7 @@ class BasePlatformAdapter(ABC):
             self.name,
             session_key,
         )
-        self._active_sessions.pop(session_key, None)
+        self._release_session_guard(session_key)
         self._pending_messages.pop(session_key, None)
         self._session_tasks.pop(session_key, None)
         self._discard_text_debounce(session_key)
@@ -4475,7 +4501,7 @@ class BasePlatformAdapter(ABC):
         session lock.
         """
         guard = interrupt_event or asyncio.Event()
-        self._active_sessions[session_key] = guard
+        self._set_session_guard(session_key, guard)
 
         task = asyncio.create_task(self._process_message_background(event, session_key))
         self._session_tasks[session_key] = task
@@ -4588,7 +4614,7 @@ class BasePlatformAdapter(ABC):
 
         current_guard = self._active_sessions.get(session_key)
         command_guard = asyncio.Event()
-        self._active_sessions[session_key] = command_guard
+        self._set_session_guard(session_key, command_guard)
         thread_meta = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
 
         try:
@@ -4631,7 +4657,7 @@ class BasePlatformAdapter(ABC):
             # we don't leave the session in a half-reset state.
             if self._active_sessions.get(session_key) is command_guard:
                 if session_key in self._session_tasks and current_guard is not None:
-                    self._active_sessions[session_key] = current_guard
+                    self._set_session_guard(session_key, current_guard)
                 else:
                     self._release_session_guard(session_key, guard=command_guard)
             raise
@@ -4879,7 +4905,7 @@ class BasePlatformAdapter(ABC):
         # the session active before spawning this task to prevent races).
         # Fall back to a new Event only if the entry was removed externally.
         interrupt_event = self._active_sessions.get(session_key) or asyncio.Event()
-        self._active_sessions[session_key] = interrupt_event
+        self._set_session_guard(session_key, interrupt_event)
         
         # Start continuous typing indicator (refreshes every 2 seconds).
         # Gated per-platform: when typing_indicator=False the refresh loop is

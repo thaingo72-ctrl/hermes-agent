@@ -1559,8 +1559,7 @@ async def test_restart_notifies_home_channel_even_without_active_sessions():
     await runner._notify_active_sessions_of_shutdown()
 
     assert adapter.sent == [
-        "⚠️ Gateway restarting — Your current task will be interrupted. "
-        "Send any message after restart and I'll try to resume where you left off."
+        "⚠️ Gateway restarting — Brief disconnect expected."
     ]
 
 
@@ -1947,3 +1946,19 @@ async def test_auto_resume_runs_agent_exactly_once_through_full_path():
     # No leaked sentinel and no orphaned queued event.
     assert session_key not in runner._running_agents
     assert session_key not in getattr(adapter, "_pending_messages", {})
+
+
+def test_runtime_active_count_includes_adapter_delivery_guard():
+    """Runtime stays busy after model return while the adapter is still delivering."""
+    from gateway.run import GatewayRunner
+
+    runner, adapter = make_restart_runner()
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._profile_adapters = {}
+    runner._running_agents = {}
+    adapter._active_sessions = {"delivery-in-progress": asyncio.Event()}
+
+    with patch("gateway.status.write_runtime_status") as write_status:
+        GatewayRunner._persist_active_agents(runner)
+
+    write_status.assert_called_once_with(active_agents=1)

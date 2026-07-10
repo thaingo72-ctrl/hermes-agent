@@ -3974,8 +3974,14 @@ def generate_launchd_plist() -> str:
 """
 
 
+def _launchd_reload_pending_path() -> Path:
+    return get_hermes_home() / ".launchd-reload-pending"
+
+
 def launchd_plist_is_current() -> bool:
-    """Check if the installed launchd plist matches the currently generated one."""
+    """Check if the installed launchd plist matches and is loaded by launchd."""
+    if _launchd_reload_pending_path().exists():
+        return False
     plist_path = get_launchd_plist_path()
     if not plist_path.exists():
         return False
@@ -3987,7 +3993,55 @@ def launchd_plist_is_current() -> bool:
     ) == _normalize_launchd_plist_for_comparison(expected)
 
 
-def refresh_launchd_plist_if_needed() -> bool:
+_LAUNCHD_REFRESH_NONE = "none"
+_LAUNCHD_REFRESH_RELOADED = "reloaded"
+_LAUNCHD_REFRESH_DEFERRED = "deferred"
+_LAUNCHD_REFRESH_FAILED = "failed"
+
+
+def _wait_for_pid_exit_after_launchd_bootout(
+    pid: int, *, timeout: float = 30.0, poll: float = 0.2
+) -> bool:
+    from gateway.status import _pid_exists
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while _pid_exists(pid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.01, poll))
+    return True
+
+
+def _wait_for_launchd_replacement_runtime(
+    previous_pid: int | None,
+    *,
+    timeout: float,
+    poll: float = 0.5,
+) -> bool:
+    from gateway.status import _pid_exists, read_runtime_status
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        runtime = read_runtime_status() or {}
+        if not isinstance(runtime, dict):
+            runtime = {}
+        try:
+            replacement_pid = int(runtime.get("pid", 0) or 0)
+        except (TypeError, ValueError):
+            replacement_pid = 0
+        if (
+            replacement_pid > 0
+            and replacement_pid != previous_pid
+            and runtime.get("gateway_state") == "running"
+            and _pid_exists(replacement_pid)
+        ):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.01, poll))
+
+
+def refresh_launchd_plist_if_needed() -> str:
     """Rewrite the installed launchd plist when the generated definition has changed.
 
     Unlike systemd, launchd picks up plist changes on the next ``launchctl kill``/
@@ -3996,13 +4050,12 @@ def refresh_launchd_plist_if_needed() -> bool:
     """
     plist_path = get_launchd_plist_path()
     if not plist_path.exists() or launchd_plist_is_current():
-        return False
+        return _LAUNCHD_REFRESH_NONE
 
     new_plist = generate_launchd_plist()
     if _refuse_temp_home_service_write(new_plist, "launchd plist"):
-        return False
+        return _LAUNCHD_REFRESH_NONE
 
-    plist_path.write_text(new_plist, encoding="utf-8")
     label = get_launchd_label()
     domain = _launchd_domain()
     target = f"{domain}/{label}"
@@ -4019,6 +4072,23 @@ def refresh_launchd_plist_if_needed() -> bool:
         gateway_pid = get_running_pid()
     except Exception:
         gateway_pid = None
+
+    # Persist retry intent before changing the installed definition. If this
+    # write fails, leave the old plist untouched so a later start still sees it
+    # as stale and retries instead of falsely treating the refresh as complete.
+    pending_path = _launchd_reload_pending_path()
+    try:
+        pending_path.parent.mkdir(parents=True, exist_ok=True)
+        pending_path.write_text(f"{gateway_pid or 0}\n", encoding="utf-8")
+    except OSError as exc:
+        logger.error("Could not persist launchd reload pending marker: %s", exc)
+        return _LAUNCHD_REFRESH_FAILED
+
+    try:
+        plist_path.write_text(new_plist, encoding="utf-8")
+    except OSError as exc:
+        logger.error("Could not rewrite launchd service definition: %s", exc)
+        return _LAUNCHD_REFRESH_FAILED
 
     if (
         gateway_pid is not None
@@ -4045,41 +4115,54 @@ def refresh_launchd_plist_if_needed() -> bool:
         except OSError:
             pass
         # Retry until launchctl LISTS the label (not merely a zero bootstrap
-        # exit) or the drain window elapses. The failure happens while the old
-        # gateway is still draining (default agent.restart_drain_timeout=180s),
-        # so a fixed ~10s window is too short — bound by that budget instead.
+        # exit) or the reload budget elapses. The detached helper first waits
+        # for the originating gateway to report zero active agent turns. This
+        # CLI may itself be a terminal tool call inside a much longer gateway
+        # turn, so a fixed sleep would interrupt the very task performing the
+        # maintenance.
         _reload_budget = int(max(30.0, _get_restart_drain_timeout()))
-        reload_script = (
-            f"sleep 2; "
-            f"launchctl bootout {shlex.quote(target)} 2>/dev/null; "
-            f"sleep 1; "
-            f"_deadline=$(($(date +%s) + {_reload_budget})); "
-            f"while :; do "
-            f"  launchctl bootstrap {shlex.quote(domain)} {shlex.quote(str(plist_path))} 2>/dev/null; "
-            f"  if launchctl list {shlex.quote(label)} >/dev/null 2>&1; then break; fi; "
-            f"  echo \"[$(date '+%Y-%m-%d %H:%M:%S %z')] bootstrap not yet registered for {shlex.quote(target)} — retrying\" >> {shlex.quote(str(reload_log_path))}; "
-            f"  if [ $(date +%s) -ge $_deadline ]; then break; fi; "
-            f"  sleep 2; "
-            f"done; "
-            f"if ! launchctl list {shlex.quote(label)} >/dev/null 2>&1; then "
-            f"  echo \"[$(date '+%Y-%m-%d %H:%M:%S %z')] FAILED launchd reload for {shlex.quote(target)} — service NOT registered after {_reload_budget}s of retries\" >> {shlex.quote(str(reload_log_path))}; "
-            f"fi"
-        )
+
+        helper_cmd = [
+            sys.executable,
+            "-m",
+            "hermes_cli._launchd_reload_helper",
+            "--gateway-pid",
+            str(gateway_pid),
+            "--target",
+            target,
+            "--domain",
+            domain,
+            "--label",
+            label,
+            "--plist-path",
+            str(plist_path),
+            "--pending-path",
+            str(pending_path),
+            "--runtime-path",
+            str(get_hermes_home() / "gateway_state.json"),
+            "--log-path",
+            str(reload_log_path),
+            "--reload-timeout",
+            str(_reload_budget),
+        ]
         try:
             subprocess.Popen(
-                ["/bin/bash", "-c", reload_script],
+                helper_cmd,
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
         except Exception as e:
+            # Fail closed: leave the pending marker so a later start retries,
+            # and report this as deferred so launchd_start does not immediately
+            # kickstart the active gateway turn we were trying to protect.
             logger.warning("Deferred launchd reload could not be spawned: %s", e)
-            return False
+            return _LAUNCHD_REFRESH_DEFERRED
         print(
             "↻ Updated gateway launchd service definition; reload deferred to a "
-            "detached helper (refresh ran inside the gateway process tree)"
+            "detached helper after active gateway work finishes"
         )
-        return True
+        return _LAUNCHD_REFRESH_DEFERRED
 
     # Bootout/bootstrap so launchd picks up the new definition. The reported
     # incident (2026-06-26) happened when bootout succeeded but bootstrap
@@ -4089,19 +4172,88 @@ def refresh_launchd_plist_if_needed() -> bool:
     # _launchctl_bootstrap EIO-recovery helper) until the label is actually
     # registered or the drain window elapses, verify with `launchctl list`,
     # and log exhaustion so the reload watchdog can detect a persistent orphan.
-    subprocess.run(
-        ["launchctl", "bootout", target],
-        check=False,
-        timeout=90,
-    )
+    _reload_budget = max(30.0, _get_restart_drain_timeout())
+    clear_planned_stop_marker = None
+    if gateway_pid is not None:
+        try:
+            from gateway.status import (
+                clear_planned_stop_marker,
+                write_planned_stop_marker,
+            )
+
+            if not write_planned_stop_marker(gateway_pid):
+                raise OSError("planned-stop marker write returned false")
+        except Exception as exc:
+            _append_launchd_reload_log(
+                f"FAILED launchd reload of {target} — planned-stop marker: {exc}"
+            )
+            logger.error("Could not write planned-stop marker for %s: %s", target, exc)
+            return _LAUNCHD_REFRESH_FAILED
+    try:
+        bootout = subprocess.run(
+            ["launchctl", "bootout", target],
+            check=False,
+            timeout=_reload_budget + 30.0,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        if clear_planned_stop_marker is not None:
+            try:
+                clear_planned_stop_marker()
+            except Exception:
+                pass
+        _append_launchd_reload_log(
+            f"FAILED launchd reload of {target} — bootout raised {exc!r}"
+        )
+        logger.error("launchd bootout of %s failed: %s", target, exc)
+        return _LAUNCHD_REFRESH_FAILED
+    if bootout.returncode != 0:
+        already_unloaded = (
+            gateway_pid is None and not _launchctl_label_registered(label)
+        )
+        if not already_unloaded:
+            if clear_planned_stop_marker is not None:
+                try:
+                    clear_planned_stop_marker()
+                except Exception:
+                    pass
+            _append_launchd_reload_log(
+                f"FAILED launchd reload of {target} — bootout rc={bootout.returncode}"
+            )
+            logger.error(
+                "launchd bootout of %s failed with exit code %s",
+                target,
+                bootout.returncode,
+            )
+            return _LAUNCHD_REFRESH_FAILED
+        _append_launchd_reload_log(
+            f"launchd job {target} was already unloaded; proceeding to bootstrap"
+        )
+    if gateway_pid is not None and not _wait_for_pid_exit_after_launchd_bootout(
+        gateway_pid,
+        timeout=_reload_budget + 30.0,
+    ):
+        if clear_planned_stop_marker is not None:
+            try:
+                clear_planned_stop_marker()
+            except Exception:
+                pass
+        _append_launchd_reload_log(
+            f"FAILED launchd reload of {target} — old PID {gateway_pid} remained alive"
+        )
+        logger.error(
+            "launchd bootout of %s returned success but old PID %s remained alive",
+            target,
+            gateway_pid,
+        )
+        return _LAUNCHD_REFRESH_FAILED
     # Size the retry window to the restart drain timeout (default 180s), not a
     # fixed ~10s: the failure mode occurs while the old gateway is still
     # draining, so a short window can exhaust before launchd settles.
-    _reload_budget = max(30.0, _get_restart_drain_timeout())
     _deadline = time.monotonic() + _reload_budget
-    if not _retry_launchctl_bootstrap_until_registered(
+    _reload_succeeded = _retry_launchctl_bootstrap_until_registered(
         domain, plist_path, label, deadline=_deadline
-    ):
+    )
+    if not _reload_succeeded:
         _append_launchd_reload_log(
             f"FAILED launchd reload of {target} — service NOT registered after "
             f"retrying for {int(_reload_budget)}s (refresh ran outside gateway "
@@ -4114,10 +4266,31 @@ def refresh_launchd_plist_if_needed() -> bool:
             int(_reload_budget),
             _launchd_reload_log_path(),
         )
+        return _LAUNCHD_REFRESH_FAILED
+
+    if not _wait_for_launchd_replacement_runtime(
+        gateway_pid,
+        timeout=_reload_budget,
+    ):
+        _append_launchd_reload_log(
+            f"FAILED launchd reload of {target} — replacement runtime did not "
+            f"become healthy within {int(_reload_budget)}s"
+        )
+        logger.error(
+            "launchd reloaded %s but no healthy replacement runtime appeared",
+            target,
+        )
+        return _LAUNCHD_REFRESH_FAILED
+
+    try:
+        pending_path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.error("Could not clear launchd reload pending marker: %s", exc)
+        return _LAUNCHD_REFRESH_FAILED
     print(
         "↻ Updated gateway launchd service definition to match the current Hermes install"
     )
-    return True
+    return _LAUNCHD_REFRESH_RELOADED
 
 
 def launchd_install(force: bool = False):
@@ -4126,7 +4299,10 @@ def launchd_install(force: bool = False):
     if plist_path.exists() and not force:
         if not launchd_plist_is_current():
             print(f"↻ Repairing outdated launchd service at: {plist_path}")
-            refresh_launchd_plist_if_needed()
+            result = refresh_launchd_plist_if_needed()
+            if result == _LAUNCHD_REFRESH_FAILED:
+                print("✗ Service definition update failed; retry remains pending")
+                return
             print("✓ Service definition updated")
             return
         print(f"Service already installed at: {plist_path}")
@@ -4205,7 +4381,16 @@ def launchd_start():
         _clear_launchd_unsupported_marker()
         return
 
-    refresh_launchd_plist_if_needed()
+    refresh_result = refresh_launchd_plist_if_needed()
+    if refresh_result == _LAUNCHD_REFRESH_DEFERRED:
+        # The detached helper owns the later bootout/bootstrap after the
+        # originating gateway turn reaches idle. An immediate kickstart here
+        # would defeat that gate and cause a second restart afterward.
+        print("✓ Service refresh scheduled after active gateway work finishes")
+        return
+    if refresh_result == _LAUNCHD_REFRESH_FAILED:
+        print("✗ Service definition refresh failed; retry remains pending")
+        return
     try:
         subprocess.run(
             ["launchctl", "kickstart", f"{_launchd_domain()}/{label}"],

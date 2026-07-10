@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -670,6 +671,11 @@ class TestLaunchdServiceRecovery:
         monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
         # Not running inside the gateway tree → direct bootout/bootstrap path.
         monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_wait_for_launchd_replacement_runtime",
+            lambda *a, **k: True,
+        )
 
         gateway_cli.launchd_install()
 
@@ -684,14 +690,37 @@ class TestLaunchdServiceRecovery:
             ["launchctl", "bootstrap", domain, str(plist_path)],
         ]
 
+    def test_launchd_plist_is_not_current_while_reload_is_pending(
+        self, tmp_path, monkeypatch
+    ):
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        pending_path = tmp_path / ".launchd-reload-pending"
+        content = "<plist>same</plist>"
+        plist_path.write_text(content, encoding="utf-8")
+        pending_path.write_text("pending", encoding="utf-8")
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(gateway_cli, "generate_launchd_plist", lambda: content)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_launchd_reload_pending_path",
+            lambda: pending_path,
+            raising=False,
+        )
+
+        assert gateway_cli.launchd_plist_is_current() is False
+
     def test_refresh_defers_reload_when_running_inside_gateway_tree(self, tmp_path, monkeypatch):
         """#43842: when the refresh runs inside the gateway's own process tree,
         a direct bootout would kill this CLI before bootstrap. The reload must
         be delegated to a detached helper instead."""
         plist_path = tmp_path / "ai.hermes.gateway.plist"
+        pending_path = tmp_path / ".launchd-reload-pending"
         plist_path.write_text("<plist>old content</plist>", encoding="utf-8")
 
         monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli, "_launchd_reload_pending_path", lambda: pending_path
+        )
         monkeypatch.setattr(gateway_cli, "launchd_plist_is_current", lambda: False)
         monkeypatch.setattr(
             gateway_cli,
@@ -725,27 +754,359 @@ class TestLaunchdServiceRecovery:
 
         result = gateway_cli.refresh_launchd_plist_if_needed()
 
-        assert result is True
+        assert result == gateway_cli._LAUNCHD_REFRESH_DEFERRED
         # The new plist was written.
         assert "--replace" in plist_path.read_text(encoding="utf-8")
         # No DIRECT bootout/bootstrap ran (those would kill us mid-sequence).
         assert not [c for c in run_calls if "bootout" in c or "bootstrap" in c]
-        # Exactly one detached helper was spawned, in a new session, and it
-        # performs both bootout and bootstrap.
+        # Exactly one detached helper was spawned in a new session. The helper
+        # must wait for the originating gateway turn to become idle before it
+        # performs the planned bootout/bootstrap reload.
         assert len(popen_calls) == 1
         cmd, kwargs = popen_calls[0]
         assert kwargs.get("start_new_session") is True
-        script = cmd[-1]
-        assert "bootout" in script and "bootstrap" in script
-        assert str(plist_path) in script
+        assert cmd[:3] == [sys.executable, "-m", "hermes_cli._launchd_reload_helper"]
+        assert cmd[cmd.index("--gateway-pid") + 1] == "4242"
+        assert cmd[cmd.index("--plist-path") + 1] == str(plist_path)
+        assert cmd[cmd.index("--pending-path") + 1] == str(pending_path)
+        assert pending_path.exists()
+
+    def test_launchd_start_does_not_kickstart_after_refresh_was_initiated(
+        self, tmp_path, monkeypatch
+    ):
+        """A deferred self-refresh owns the later reload; start must not kill now."""
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        plist_path.write_text("<plist>old content</plist>", encoding="utf-8")
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli,
+            "refresh_launchd_plist_if_needed",
+            lambda: gateway_cli._LAUNCHD_REFRESH_DEFERRED,
+        )
+        run_calls = []
+        monkeypatch.setattr(
+            gateway_cli.subprocess,
+            "run",
+            lambda cmd, **kwargs: run_calls.append(cmd)
+            or SimpleNamespace(returncode=0, stdout="", stderr=""),
+        )
+
+        gateway_cli.launchd_start()
+
+        assert not [call for call in run_calls if "kickstart" in call]
+
+    def test_deferred_refresh_marker_failure_restores_old_plist(
+        self, tmp_path, monkeypatch
+    ):
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        pending_path = tmp_path / "pending-is-a-directory"
+        pending_path.mkdir()
+        old_content = "<plist>old</plist>"
+        plist_path.write_text(old_content, encoding="utf-8")
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli, "_launchd_reload_pending_path", lambda: pending_path
+        )
+        monkeypatch.setattr(gateway_cli, "launchd_plist_is_current", lambda: False)
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: "gui/501")
+        monkeypatch.setattr(
+            gateway_cli, "generate_launchd_plist", lambda: "<plist>new</plist>"
+        )
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: 4242)
+        monkeypatch.setattr(
+            gateway_cli, "_is_pid_ancestor_of_current_process", lambda _pid: True
+        )
+        popen_calls = []
+        monkeypatch.setattr(
+            gateway_cli.subprocess,
+            "Popen",
+            lambda *a, **k: popen_calls.append((a, k)),
+        )
+
+        result = gateway_cli.refresh_launchd_plist_if_needed()
+
+        assert result == "failed"
+        assert plist_path.read_text(encoding="utf-8") == old_content
+        assert popen_calls == []
+
+    def test_direct_refresh_planned_stop_marker_failure_aborts_before_bootout(
+        self, tmp_path, monkeypatch
+    ):
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        pending_path = tmp_path / ".launchd-reload-pending"
+        plist_path.write_text("<plist>old</plist>", encoding="utf-8")
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli, "_launchd_reload_pending_path", lambda: pending_path
+        )
+        monkeypatch.setattr(gateway_cli, "launchd_plist_is_current", lambda: False)
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: "gui/501")
+        monkeypatch.setattr(
+            gateway_cli, "generate_launchd_plist", lambda: "<plist>new</plist>"
+        )
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: 4242)
+        monkeypatch.setattr(
+            gateway_cli, "_is_pid_ancestor_of_current_process", lambda _pid: False
+        )
+        monkeypatch.setattr(
+            "gateway.status.write_planned_stop_marker", lambda _pid: False
+        )
+        run_calls = []
+        monkeypatch.setattr(
+            gateway_cli.subprocess,
+            "run",
+            lambda *a, **k: run_calls.append((a, k)),
+        )
+
+        result = gateway_cli.refresh_launchd_plist_if_needed()
+
+        assert result == "failed"
+        assert pending_path.exists()
+        assert run_calls == []
+
+    def test_direct_refresh_bootout_failure_preserves_pending_retry(
+        self, tmp_path, monkeypatch
+    ):
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        pending_path = tmp_path / ".launchd-reload-pending"
+        plist_path.write_text("<plist>old</plist>", encoding="utf-8")
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli, "_launchd_reload_pending_path", lambda: pending_path
+        )
+        monkeypatch.setattr(gateway_cli, "launchd_plist_is_current", lambda: False)
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: "gui/501")
+        monkeypatch.setattr(
+            gateway_cli, "generate_launchd_plist", lambda: "<plist>new</plist>"
+        )
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: 4242)
+        monkeypatch.setattr(
+            gateway_cli, "_is_pid_ancestor_of_current_process", lambda _pid: False
+        )
+        calls = []
+        planned_calls = []
+        monkeypatch.setattr(
+            "gateway.status.write_planned_stop_marker",
+            lambda pid: planned_calls.append(("write", pid)) or True,
+        )
+        monkeypatch.setattr(
+            "gateway.status.clear_planned_stop_marker",
+            lambda: planned_calls.append(("clear", None)),
+        )
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return SimpleNamespace(returncode=5)
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        result = gateway_cli.refresh_launchd_plist_if_needed()
+
+        assert result == "failed"
+        assert pending_path.exists()
+        assert calls == [
+            [
+                "launchctl",
+                "bootout",
+                gateway_cli._launchd_domain() + "/" + gateway_cli.get_launchd_label(),
+            ]
+        ]
+        assert planned_calls == [("write", 4242), ("clear", None)]
+
+    def test_direct_refresh_recovers_when_launchd_job_is_already_unloaded(
+        self, tmp_path, monkeypatch
+    ):
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        pending_path = tmp_path / ".launchd-reload-pending"
+        plist_path.write_text("<plist>old</plist>", encoding="utf-8")
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli, "_launchd_reload_pending_path", lambda: pending_path
+        )
+        monkeypatch.setattr(gateway_cli, "launchd_plist_is_current", lambda: False)
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: "gui/501")
+        monkeypatch.setattr(
+            gateway_cli, "generate_launchd_plist", lambda: "<plist>new</plist>"
+        )
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: None)
+        monkeypatch.setattr(gateway_cli, "_launchctl_label_registered", lambda _label: False)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_retry_launchctl_bootstrap_until_registered",
+            lambda *a, **k: True,
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_wait_for_launchd_replacement_runtime",
+            lambda *a, **k: True,
+        )
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return SimpleNamespace(returncode=3)
+
+        monkeypatch.setattr(gateway_cli.subprocess, "run", fake_run)
+
+        result = gateway_cli.refresh_launchd_plist_if_needed()
+
+        assert result == "reloaded"
+        assert not pending_path.exists()
+        assert calls[0][0][:2] == ["launchctl", "bootout"]
+
+    def test_direct_refresh_old_pid_survival_preserves_pending_retry(
+        self, tmp_path, monkeypatch
+    ):
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        pending_path = tmp_path / ".launchd-reload-pending"
+        plist_path.write_text("<plist>old</plist>", encoding="utf-8")
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli, "_launchd_reload_pending_path", lambda: pending_path
+        )
+        monkeypatch.setattr(gateway_cli, "launchd_plist_is_current", lambda: False)
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: "gui/501")
+        monkeypatch.setattr(
+            gateway_cli, "generate_launchd_plist", lambda: "<plist>new</plist>"
+        )
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: 4242)
+        monkeypatch.setattr(
+            gateway_cli, "_is_pid_ancestor_of_current_process", lambda _pid: False
+        )
+        bootout_calls = []
+        monkeypatch.setattr(
+            gateway_cli.subprocess,
+            "run",
+            lambda cmd, **kwargs: bootout_calls.append((cmd, kwargs))
+            or SimpleNamespace(returncode=0),
+        )
+        pid_waits = []
+        planned_calls = []
+        monkeypatch.setattr(
+            "gateway.status.write_planned_stop_marker",
+            lambda pid: planned_calls.append(("write", pid)) or True,
+        )
+        monkeypatch.setattr(
+            "gateway.status.clear_planned_stop_marker",
+            lambda: planned_calls.append(("clear", None)),
+        )
+        monkeypatch.setattr(gateway_cli, "_get_restart_drain_timeout", lambda: 77.0)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_wait_for_pid_exit_after_launchd_bootout",
+            lambda pid, **kwargs: pid_waits.append((pid, kwargs)) or False,
+        )
+        bootstrap_calls = []
+        monkeypatch.setattr(
+            gateway_cli,
+            "_retry_launchctl_bootstrap_until_registered",
+            lambda *a, **k: bootstrap_calls.append((a, k)) or True,
+        )
+
+        result = gateway_cli.refresh_launchd_plist_if_needed()
+
+        assert result == "failed"
+        assert pending_path.exists()
+        assert bootout_calls[0][1]["timeout"] == 107.0
+        assert pid_waits == [(4242, {"timeout": 107.0})]
+        assert planned_calls == [("write", 4242), ("clear", None)]
+        assert bootstrap_calls == []
+
+    def test_direct_refresh_bootstrap_failure_preserves_pending_retry(
+        self, tmp_path, monkeypatch
+    ):
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        pending_path = tmp_path / ".launchd-reload-pending"
+        plist_path.write_text("<plist>old</plist>", encoding="utf-8")
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli, "_launchd_reload_pending_path", lambda: pending_path
+        )
+        monkeypatch.setattr(gateway_cli, "launchd_plist_is_current", lambda: False)
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: "gui/501")
+        monkeypatch.setattr(
+            gateway_cli, "generate_launchd_plist", lambda: "<plist>new</plist>"
+        )
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: 4242)
+        monkeypatch.setattr(
+            gateway_cli, "_is_pid_ancestor_of_current_process", lambda _pid: False
+        )
+        monkeypatch.setattr(
+            gateway_cli.subprocess,
+            "run",
+            lambda _cmd, **_kwargs: SimpleNamespace(returncode=0),
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_retry_launchctl_bootstrap_until_registered",
+            lambda *a, **k: False,
+        )
+
+        result = gateway_cli.refresh_launchd_plist_if_needed()
+
+        assert result == "failed"
+        assert pending_path.exists()
+
+    def test_direct_refresh_runtime_health_failure_preserves_pending_retry(
+        self, tmp_path, monkeypatch
+    ):
+        plist_path = tmp_path / "ai.hermes.gateway.plist"
+        pending_path = tmp_path / ".launchd-reload-pending"
+        plist_path.write_text("<plist>old</plist>", encoding="utf-8")
+        monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli, "_launchd_reload_pending_path", lambda: pending_path
+        )
+        monkeypatch.setattr(gateway_cli, "launchd_plist_is_current", lambda: False)
+        monkeypatch.setattr(gateway_cli, "_launchd_domain", lambda: "gui/501")
+        monkeypatch.setattr(
+            gateway_cli, "generate_launchd_plist", lambda: "<plist>new</plist>"
+        )
+        monkeypatch.setattr("gateway.status.get_running_pid", lambda *a, **k: 4242)
+        monkeypatch.setattr(
+            gateway_cli, "_is_pid_ancestor_of_current_process", lambda _pid: False
+        )
+        monkeypatch.setattr(
+            gateway_cli.subprocess,
+            "run",
+            lambda _cmd, **_kwargs: SimpleNamespace(returncode=0),
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_wait_for_pid_exit_after_launchd_bootout",
+            lambda *a, **k: True,
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_retry_launchctl_bootstrap_until_registered",
+            lambda *a, **k: True,
+        )
+        runtime_waits = []
+        monkeypatch.setattr(
+            gateway_cli,
+            "_wait_for_launchd_replacement_runtime",
+            lambda *a, **k: runtime_waits.append((a, k)) or False,
+            raising=False,
+        )
+
+        result = gateway_cli.refresh_launchd_plist_if_needed()
+
+        assert result == "failed"
+        assert pending_path.exists()
+        assert runtime_waits
 
     def test_refresh_uses_direct_reload_when_not_inside_gateway_tree(self, tmp_path, monkeypatch):
         """Normal CLI-initiated refresh (outside the service tree) keeps the
         direct synchronous bootout/bootstrap path."""
         plist_path = tmp_path / "ai.hermes.gateway.plist"
+        pending_path = tmp_path / ".launchd-reload-pending"
+        pending_path.write_text("pending", encoding="utf-8")
         plist_path.write_text("<plist>old content</plist>", encoding="utf-8")
 
         monkeypatch.setattr(gateway_cli, "get_launchd_plist_path", lambda: plist_path)
+        monkeypatch.setattr(
+            gateway_cli, "_launchd_reload_pending_path", lambda: pending_path
+        )
         monkeypatch.setattr(gateway_cli, "launchd_plist_is_current", lambda: False)
         monkeypatch.setattr(
             gateway_cli,
@@ -774,10 +1135,17 @@ class TestLaunchdServiceRecovery:
             gateway_cli.subprocess, "Popen",
             lambda cmd, **kw: popen_calls.append(cmd) or SimpleNamespace(pid=1),
         )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_wait_for_launchd_replacement_runtime",
+            lambda *a, **k: True,
+            raising=False,
+        )
 
         result = gateway_cli.refresh_launchd_plist_if_needed()
 
-        assert result is True
+        assert result == gateway_cli._LAUNCHD_REFRESH_RELOADED
+        assert not pending_path.exists()
         # No detached helper — direct path taken.
         assert not popen_calls
         label = gateway_cli.get_launchd_label()

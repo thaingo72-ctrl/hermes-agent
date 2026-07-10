@@ -238,6 +238,46 @@ async def test_normal_path_releases_session_guard():
 
 
 @pytest.mark.asyncio
+async def test_activity_callback_stays_busy_until_final_delivery_finishes():
+    """The adapter must not publish idle between model completion and send completion."""
+    adapter = _make_adapter()
+    sk = _sk()
+    activity_counts: list[int] = []
+    send_started = asyncio.Event()
+    finish_send = asyncio.Event()
+
+    adapter._activity_change_handler = lambda: activity_counts.append(
+        len(adapter._active_sessions)
+    )
+
+    async def handler(_event):
+        return "final response"
+
+    async def slow_send(*_args, **_kwargs):
+        send_started.set()
+        await finish_send.wait()
+        return None
+
+    adapter._message_handler = handler
+    adapter._send_with_retry = slow_send
+
+    await adapter.handle_message(_make_event(text="deliver"))
+    await asyncio.wait_for(send_started.wait(), timeout=1)
+
+    assert activity_counts == [1]
+    assert sk in adapter._active_sessions
+
+    finish_send.set()
+    for _ in range(200):
+        if activity_counts == [1, 0]:
+            break
+        await asyncio.sleep(0.01)
+
+    await adapter.cancel_background_tasks()
+    assert activity_counts == [1, 0]
+
+
+@pytest.mark.asyncio
 async def test_drain_task_cancellation_releases_session():
     """If the in-band drain task is cancelled (e.g. user sent ``/stop``
     mid-drain), the session guard and task registry must still get
