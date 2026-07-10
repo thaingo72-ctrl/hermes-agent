@@ -13,6 +13,14 @@ import hermes_cli.gateway as gateway
 def _install_fake_gateway_run(monkeypatch, start_gateway):
     module = ModuleType("gateway.run")
     module.start_gateway = start_gateway
+    exit_codes = []
+
+    def fake_exit_after_graceful_shutdown(code):
+        exit_codes.append(code)
+        if code:
+            raise SystemExit(code)
+
+    setattr(module, "_exit_after_graceful_shutdown", fake_exit_after_graceful_shutdown)
     monkeypatch.setitem(sys.modules, "gateway.run", module)
     # ``run_gateway()`` calls ``refresh_systemd_unit_if_needed()`` on every
     # invocation so that restart settings stay current after exit-code-75
@@ -38,6 +46,7 @@ def _install_fake_gateway_run(monkeypatch, start_gateway):
         "get_gateway_runtime_snapshot",
         lambda *a, **k: gateway.GatewayRuntimeSnapshot(manager="manual process"),
     )
+    return exit_codes
 
 
 def test_run_gateway_exits_cleanly_on_keyboard_interrupt(monkeypatch, capsys):
@@ -50,15 +59,46 @@ def test_run_gateway_exits_cleanly_on_keyboard_interrupt(monkeypatch, capsys):
     def fake_asyncio_run(coro):
         raise KeyboardInterrupt
 
-    _install_fake_gateway_run(monkeypatch, fake_start_gateway)
+    exit_codes = _install_fake_gateway_run(monkeypatch, fake_start_gateway)
     monkeypatch.setattr(gateway.asyncio, "run", fake_asyncio_run)
 
     gateway.run_gateway()
 
     out = capsys.readouterr().out
     assert calls == [(False, 0)]
+    assert exit_codes == [0]
     assert "Press Ctrl+C to stop" in out
     assert "Gateway stopped." in out
+
+
+def test_run_gateway_does_not_inherit_internal_self_restart_disable_marker(monkeypatch):
+    observed_markers = []
+
+    async def fake_start_gateway(*, replace, verbosity):
+        observed_markers.append(
+            gateway.os.environ.get("HERMES_GATEWAY_DISABLE_SELF_RESTART")
+        )
+        return True
+
+    exit_codes = _install_fake_gateway_run(monkeypatch, fake_start_gateway)
+    monkeypatch.setattr(gateway, "_guard_official_docker_root_gateway", lambda: None)
+    monkeypatch.setattr(
+        gateway, "_guard_named_profile_under_multiplexer", lambda force=False: None
+    )
+    monkeypatch.setattr(
+        gateway, "_guard_supervised_gateway_conflict", lambda force=False: None
+    )
+    monkeypatch.setattr(
+        gateway,
+        "_guard_existing_gateway_process_conflict",
+        lambda replace=False: None,
+    )
+    monkeypatch.setenv("HERMES_GATEWAY_DISABLE_SELF_RESTART", "1")
+
+    gateway.run_gateway()
+
+    assert observed_markers == [None]
+    assert exit_codes == [0]
 
 
 def test_run_gateway_exits_nonzero_when_start_gateway_reports_failure(monkeypatch):
@@ -68,7 +108,7 @@ def test_run_gateway_exits_nonzero_when_start_gateway_reports_failure(monkeypatc
         calls.append((replace, verbosity))
         return object()
 
-    _install_fake_gateway_run(monkeypatch, fake_start_gateway)
+    exit_codes = _install_fake_gateway_run(monkeypatch, fake_start_gateway)
     monkeypatch.setattr(gateway.asyncio, "run", lambda coro: False)
 
     with pytest.raises(SystemExit) as exc_info:
@@ -76,6 +116,24 @@ def test_run_gateway_exits_nonzero_when_start_gateway_reports_failure(monkeypatc
 
     assert exc_info.value.code == 1
     assert calls == [(True, None)]
+    assert exit_codes == [1]
+
+
+def test_run_gateway_preserves_supervisor_restart_exit_code(monkeypatch):
+    def fake_start_gateway(*, replace, verbosity):
+        return object()
+
+    def fake_asyncio_run(coro):
+        raise SystemExit(75)
+
+    exit_codes = _install_fake_gateway_run(monkeypatch, fake_start_gateway)
+    monkeypatch.setattr(gateway.asyncio, "run", fake_asyncio_run)
+
+    with pytest.raises(SystemExit) as exc_info:
+        gateway.run_gateway()
+
+    assert exc_info.value.code == 75
+    assert exit_codes == [75]
 
 
 def test_run_gateway_refuses_root_in_official_docker(monkeypatch, tmp_path, capsys):
@@ -104,7 +162,7 @@ def test_run_gateway_root_guard_has_escape_hatch(monkeypatch):
         calls.append((replace, verbosity))
         return object()
 
-    _install_fake_gateway_run(monkeypatch, fake_start_gateway)
+    exit_codes = _install_fake_gateway_run(monkeypatch, fake_start_gateway)
     monkeypatch.setattr(gateway.asyncio, "run", lambda coro: True)
     monkeypatch.setattr(gateway.os, "geteuid", lambda: 0)
     monkeypatch.setattr(gateway, "_is_official_docker_checkout", lambda: True)
@@ -113,6 +171,7 @@ def test_run_gateway_root_guard_has_escape_hatch(monkeypatch):
     gateway.run_gateway(verbose=2, replace=True)
 
     assert calls == [(True, 2)]
+    assert exit_codes == [0]
 
 
 def _clear_supervisor_markers(monkeypatch):

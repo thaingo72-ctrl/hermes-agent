@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -14,6 +19,115 @@ class _ExitCalled(Exception):
 
 def _raise_exit(code: int) -> None:
     raise _ExitCalled(code)
+
+
+def test_cli_run_gateway_force_exits_with_wedged_executor(tmp_path):
+    """The installed service enters through hermes_cli.gateway.run_gateway,
+    not gateway.run.main. A non-daemon executor worker must not strand that
+    real entrypoint during a planned service restart."""
+    project_root = Path(__file__).resolve().parents[2]
+    script = textwrap.dedent(
+        """
+        import concurrent.futures
+        import threading
+
+        import gateway.run as gateway_run
+        import hermes_cli.gateway as gateway_cli
+
+        gateway_cli._guard_official_docker_root_gateway = lambda: None
+        gateway_cli._guard_named_profile_under_multiplexer = lambda force=False: None
+        gateway_cli._guard_supervised_gateway_conflict = lambda force=False: None
+        gateway_cli._guard_existing_gateway_process_conflict = lambda replace=False: None
+        gateway_cli.supports_systemd_services = lambda: False
+
+        async def fake_start_gateway(*args, **kwargs):
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            executor.submit(threading.Event().wait)
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise SystemExit(75)
+
+        gateway_run.start_gateway = fake_start_gateway
+        gateway_cli.run_gateway()
+        """
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "HERMES_GATEWAY_EXIT_DIAG": "0",
+            "HERMES_HOME": str(tmp_path / "hermes-home"),
+            "PYTHONPATH": str(project_root),
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 75, result.stderr
+
+
+def test_cli_run_gateway_force_exits_when_exception_diagnostics_fail(tmp_path):
+    """Broken stderr must not prevent a bounded nonzero process exit."""
+    project_root = Path(__file__).resolve().parents[2]
+    script = textwrap.dedent(
+        """
+        import concurrent.futures
+        import sys
+        import threading
+
+        import gateway.run as gateway_run
+        import hermes_cli.gateway as gateway_cli
+
+        gateway_cli._guard_official_docker_root_gateway = lambda: None
+        gateway_cli._guard_named_profile_under_multiplexer = lambda force=False: None
+        gateway_cli._guard_supervised_gateway_conflict = lambda force=False: None
+        gateway_cli._guard_existing_gateway_process_conflict = lambda replace=False: None
+        gateway_cli.supports_systemd_services = lambda: False
+
+        class BrokenStderr:
+            def write(self, _data):
+                raise OSError("stderr unavailable")
+
+            def flush(self):
+                raise OSError("stderr unavailable")
+
+        async def fake_start_gateway(*args, **kwargs):
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            executor.submit(threading.Event().wait)
+            executor.shutdown(wait=False, cancel_futures=True)
+            sys.stderr = BrokenStderr()
+            raise RuntimeError("unexpected gateway failure")
+
+        gateway_run.start_gateway = fake_start_gateway
+        gateway_cli.run_gateway()
+        """
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "HERMES_GATEWAY_EXIT_DIAG": "0",
+            "HERMES_HOME": str(tmp_path / "hermes-home"),
+            "PYTHONPATH": str(project_root),
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 1
 
 
 def test_main_force_exits_zero_after_clean_shutdown(monkeypatch):
