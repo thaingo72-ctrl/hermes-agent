@@ -20964,6 +20964,51 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     return True
 
 
+def _run_gateway_event_loop(awaitable):
+    """Run the gateway coroutine without joining the default executor on exit.
+
+    ``asyncio.run()`` performs an unbounded ``shutdown_default_executor()``
+    before returning or re-raising. A tool/cron call blocked in
+    ``asyncio.to_thread()`` can therefore prevent the caller from ever reaching
+    the gateway's ``os._exit`` backstop. Gateway teardown is already responsible
+    for bounded cooperative cleanup, so this runner cancels residual tasks and
+    closes async generators with a small budget, closes the loop (which requests
+    executor shutdown with ``wait=False``), and deliberately does not join the
+    default executor. The caller must hard-exit immediately afterwards.
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(awaitable)
+    finally:
+        try:
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                try:
+                    done, _still_pending = loop.run_until_complete(
+                        asyncio.wait(pending, timeout=1.0)
+                    )
+                    for task in done:
+                        if not task.cancelled():
+                            try:
+                                task.exception()
+                            except BaseException:
+                                pass
+                except BaseException:
+                    pass
+            try:
+                loop.run_until_complete(
+                    asyncio.wait_for(loop.shutdown_asyncgens(), timeout=1.0)
+                )
+            except BaseException:
+                pass
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+
 def main():
     """CLI entry point for the gateway."""
     # Force UTF-8 stdio on Windows — gateway logs and startup banner would
@@ -21004,7 +21049,7 @@ def main():
     # same os._exit backstop means EVERY exit path is wedge-proof, not just the
     # boolean-return ones.
     try:
-        success = asyncio.run(start_gateway(config))
+        success = _run_gateway_event_loop(start_gateway(config))
         exit_code = 0 if success else 1
     except SystemExit as e:
         # e.code may be None (→ 0), an int, or a str (→ 1, like CPython).

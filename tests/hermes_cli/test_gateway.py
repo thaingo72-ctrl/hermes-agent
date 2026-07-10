@@ -19,8 +19,12 @@ def _install_fake_gateway_run(monkeypatch, start_gateway):
         exit_codes.append(code)
         if code:
             raise SystemExit(code)
-
     setattr(module, "_exit_after_graceful_shutdown", fake_exit_after_graceful_shutdown)
+    setattr(
+        module,
+        "_run_gateway_event_loop",
+        lambda awaitable: gateway.asyncio.run(awaitable),
+    )
     monkeypatch.setitem(sys.modules, "gateway.run", module)
     # ``run_gateway()`` calls ``refresh_systemd_unit_if_needed()`` on every
     # invocation so that restart settings stay current after exit-code-75
