@@ -21381,6 +21381,8 @@ def main():
     try:
         success = _run_gateway_event_loop(start_gateway(config))
         exit_code = 0 if success else 1
+    except KeyboardInterrupt:
+        exit_code = 0
     except SystemExit as e:
         # e.code may be None (→ 0), an int, or a str (→ 1, like CPython).
         if e.code is None:
@@ -21389,6 +21391,10 @@ def main():
             exit_code = e.code
         else:
             exit_code = 1
+    except BaseException:
+        # Unexpected failures must also bypass interpreter finalization: a
+        # wedged executor worker can otherwise strand this legacy entrypoint.
+        exit_code = 1
     _exit_after_graceful_shutdown(exit_code)
 
 

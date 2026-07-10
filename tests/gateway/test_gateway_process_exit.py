@@ -128,6 +128,55 @@ def test_cli_run_gateway_force_exits_with_wedged_default_executor(tmp_path):
     assert result.returncode == 75, result.stderr
 
 
+def test_main_force_exits_one_with_wedged_default_executor(tmp_path):
+    """The legacy gateway.run entrypoint must hard-exit on unexpected errors."""
+    project_root = Path(__file__).resolve().parents[2]
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import threading
+
+        import gateway.run as gateway_run
+
+        async def fake_start_gateway(*args, **kwargs):
+            worker_started = threading.Event()
+            blocker = threading.Event()
+
+            def block_forever():
+                worker_started.set()
+                blocker.wait()
+
+            asyncio.get_running_loop().run_in_executor(None, block_forever)
+            while not worker_started.is_set():
+                await asyncio.sleep(0)
+            raise RuntimeError("unexpected gateway failure")
+
+        gateway_run.start_gateway = fake_start_gateway
+        gateway_run.main()
+        """
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "HERMES_GATEWAY_EXIT_DIAG": "0",
+            "HERMES_HOME": str(tmp_path / "hermes-home"),
+            "PYTHONPATH": str(project_root),
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stderr
+
+
 def test_cli_run_gateway_force_exits_when_exception_diagnostics_fail(tmp_path):
     """Broken stderr must not prevent a bounded nonzero process exit."""
     project_root = Path(__file__).resolve().parents[2]
