@@ -443,13 +443,11 @@ export interface Translations {
       envOverrideTitle: string
       envOverrideDesc: string
       modeTitle: string
-      modeLocal: string
-      modeCloud: string
-      modeRemote: string
       localTitle: string
       localDesc: string
       remoteTitle: string
       remoteDesc: string
+      remoteAuthHint: string
       cloudTitle: string
       cloudDesc: string
       cloudSignInTitle: string

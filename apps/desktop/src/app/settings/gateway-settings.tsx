@@ -3,10 +3,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Tip } from '@/components/ui/tooltip'
 import type { DesktopAuthProvider, DesktopCloudAgent, DesktopCloudOrg, DesktopConnectionProbeResult } from '@/global'
 import { useI18n } from '@/i18n'
 import { ExternalLink } from '@/lib/external-link'
-import { AlertCircle, Check, Cloud, FileText, Globe, Loader2, LogIn, Monitor, RefreshCw } from '@/lib/icons'
+import { AlertCircle, Check, Cloud, FileText, Globe, HelpCircle, Loader2, LogIn, Monitor, RefreshCw } from '@/lib/icons'
 import { selectableCardClass } from '@/lib/selectable-card'
 import { cn } from '@/lib/utils'
 import { previewGatewaySwitch } from '@/store/gateway-switch'
@@ -48,6 +49,7 @@ function ModeCard({
   active,
   description,
   disabled,
+  hint,
   icon: Icon,
   onSelect,
   title
@@ -55,6 +57,7 @@ function ModeCard({
   active: boolean
   description: string
   disabled?: boolean
+  hint?: string
   icon: typeof Monitor
   onSelect: () => void
   title: string
@@ -71,9 +74,17 @@ function ModeCard({
     >
       <div className="flex items-center gap-2">
         <Icon className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate text-[length:var(--conversation-text-font-size)] font-medium">
-          {title}
-        </span>
+        <span className="min-w-0 flex-1 text-[length:var(--conversation-text-font-size)] font-medium">{title}</span>
+        {hint ? (
+          <Tip label={hint}>
+            <span
+              className="grid size-3.5 shrink-0 cursor-help place-items-center rounded-full text-(--ui-text-tertiary) hover:text-(--ui-text-secondary)"
+              onClick={event => event.stopPropagation()}
+            >
+              <HelpCircle className="size-3.5" />
+            </span>
+          </Tip>
+        ) : null}
         {active ? <Check className="size-3.5 shrink-0 text-primary" /> : <span className="size-3.5 shrink-0" />}
       </div>
       <p className="mt-1.5 flex-1 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
@@ -767,6 +778,7 @@ export function GatewaySettings() {
             active={state.mode === 'remote'}
             description={g.remoteDesc}
             disabled={state.envOverride}
+            hint={g.remoteAuthHint}
             icon={Globe}
             onSelect={() => setState(current => ({ ...current, mode: 'remote' }))}
             title={g.remoteTitle}

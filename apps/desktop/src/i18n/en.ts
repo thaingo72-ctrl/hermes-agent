@@ -531,17 +531,14 @@ export const en: Translations = {
       envOverrideDesc:
         'Unset HERMES_DESKTOP_REMOTE_URL and HERMES_DESKTOP_REMOTE_TOKEN to use the saved setting below.',
       modeTitle: 'Connection mode',
-      modeLocal: 'Local',
-      modeCloud: 'Cloud',
-      modeRemote: 'Remote',
       localTitle: 'Local gateway',
       localDesc: 'Start a private Hermes backend on localhost. This is the default and works offline.',
       remoteTitle: 'Remote gateway',
-      remoteDesc:
-        'Connect this desktop shell to a remote Hermes backend. Hosted gateways use OAuth or a username and password; self-hosted ones may use a session token.',
+      remoteDesc: 'Connect this desktop shell to a remote Hermes backend.',
+      remoteAuthHint:
+        'Hosted gateways use OAuth or a username and password; self-hosted ones may use a session token.',
       cloudTitle: 'Hermes Cloud',
-      cloudDesc:
-        'Sign in once to Hermes Cloud and pick from the agents on your account — no URL to paste. Connects to the one you choose.',
+      cloudDesc: 'Sign in once to Hermes Cloud and pick from the agents on your account — no URL to paste.',
       cloudSignInTitle: 'Hermes Cloud',
       cloudSignIn: 'Sign in to Hermes Cloud',
       cloudSignedIn: 'Signed in to Hermes Cloud',
