@@ -72,6 +72,62 @@ def test_cli_run_gateway_force_exits_with_wedged_executor(tmp_path):
     assert result.returncode == 75, result.stderr
 
 
+def test_cli_run_gateway_force_exits_with_wedged_default_executor(tmp_path):
+    """asyncio loop cleanup must not wait forever for its default executor."""
+    project_root = Path(__file__).resolve().parents[2]
+    script = textwrap.dedent(
+        """
+        import asyncio
+        import threading
+
+        import gateway.run as gateway_run
+        import hermes_cli.gateway as gateway_cli
+
+        gateway_cli._guard_official_docker_root_gateway = lambda: None
+        gateway_cli._guard_named_profile_under_multiplexer = lambda force=False: None
+        gateway_cli._guard_supervised_gateway_conflict = lambda force=False: None
+        gateway_cli._guard_existing_gateway_process_conflict = lambda replace=False: None
+        gateway_cli.supports_systemd_services = lambda: False
+
+        async def fake_start_gateway(*args, **kwargs):
+            worker_started = threading.Event()
+            blocker = threading.Event()
+
+            def block_forever():
+                worker_started.set()
+                blocker.wait()
+
+            asyncio.get_running_loop().run_in_executor(None, block_forever)
+            while not worker_started.is_set():
+                await asyncio.sleep(0)
+            raise SystemExit(75)
+
+        gateway_run.start_gateway = fake_start_gateway
+        gateway_cli.run_gateway()
+        """
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "HERMES_GATEWAY_EXIT_DIAG": "0",
+            "HERMES_HOME": str(tmp_path / "hermes-home"),
+            "PYTHONPATH": str(project_root),
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=project_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 75, result.stderr
+
+
 def test_cli_run_gateway_force_exits_when_exception_diagnostics_fail(tmp_path):
     """Broken stderr must not prevent a bounded nonzero process exit."""
     project_root = Path(__file__).resolve().parents[2]

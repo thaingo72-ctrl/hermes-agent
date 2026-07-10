@@ -4782,7 +4782,11 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         except Exception:
             pass  # best-effort; don't block gateway startup
 
-    from gateway.run import _exit_after_graceful_shutdown, start_gateway
+    from gateway.run import (
+        _exit_after_graceful_shutdown,
+        _run_gateway_event_loop,
+        start_gateway,
+    )
 
     print("┌─────────────────────────────────────────────────────────┐")
     print("│           ⚕ Hermes Gateway Starting...                 │")
@@ -4849,13 +4853,15 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
 
     success = False
     try:
-        success = asyncio.run(start_gateway(replace=replace, verbosity=verbosity))
-        _exit_diag("asyncio.run.returned", success=success)
+        success = _run_gateway_event_loop(
+            start_gateway(replace=replace, verbosity=verbosity)
+        )
+        _exit_diag("gateway.event_loop.returned", success=success)
     except KeyboardInterrupt:
         # On Windows-detached runs this shouldn't fire (we absorb SIGINT above),
         # but keep the handler for console runs.
         _exit_diag(
-            "asyncio.run.KeyboardInterrupt",
+            "gateway.event_loop.KeyboardInterrupt",
             traceback=_traceback.format_exc(),
         )
         print("\nGateway stopped.")
@@ -4863,7 +4869,7 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         return
     except SystemExit as e:
         _exit_diag(
-            "asyncio.run.SystemExit",
+            "gateway.event_loop.SystemExit",
             code=getattr(e, "code", None),
             traceback=_traceback.format_exc(),
         )
@@ -4881,7 +4887,7 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         # the hard-exit backstop must run even if diagnostic I/O is unusable.
         try:
             _exit_diag(
-                "asyncio.run.exception",
+                "gateway.event_loop.exception",
                 exc_type=type(e).__name__,
                 exc_repr=repr(e),
                 traceback=_traceback.format_exc(),
