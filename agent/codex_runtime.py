@@ -18,11 +18,124 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
+
+
+class CodexRequestGuard:
+    """Request-local lifecycle and event state for one Codex worker.
+
+    The lock protects only tiny state transitions. External display/TTS
+    callbacks never run under it, so timeout and interrupt deactivation remain
+    bounded even if a callback blocks.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._state = "active"
+        self._last_event_ts: float | None = None
+        self._client: Any = None
+        self._client_owner_tid: int | None = None
+        self._client_abort_in_progress = False
+
+    def is_active(self) -> bool:
+        with self._lock:
+            return self._state == "active"
+
+    def is_completed(self) -> bool:
+        with self._lock:
+            return self._state == "completed"
+
+    def deactivate(self) -> bool:
+        with self._lock:
+            if self._state != "active":
+                return False
+            self._state = "cancelled"
+            return True
+
+    def register_client(self, client: Any, owner_tid: int) -> bool:
+        """Register a request-local client only while this request can still win."""
+        with self._lock:
+            if self._state != "active":
+                return False
+            self._client = client
+            self._client_owner_tid = owner_tid
+            return True
+
+    def client_for_close(self, caller_tid: int) -> tuple[Any, bool]:
+        """Return client and whether caller is a stranger thread.
+
+        Stranger-thread aborts leave ownership registered so the worker can do
+        the final full close without triggering the TLS FD-reuse race.
+        """
+        with self._condition:
+            client = self._client
+            owner_tid = self._client_owner_tid
+            stranger = (
+                client is not None
+                and owner_tid is not None
+                and owner_tid != caller_tid
+            )
+            if stranger:
+                if self._client_abort_in_progress:
+                    return None, True
+                self._client_abort_in_progress = True
+                return client, True
+            while self._client_abort_in_progress:
+                self._condition.wait()
+            client = self._client
+            self._client = None
+            self._client_owner_tid = None
+            return client, False
+
+    def finish_stranger_abort(self, client: Any) -> None:
+        with self._condition:
+            if self._client is client:
+                self._client_abort_in_progress = False
+                self._condition.notify_all()
+
+    def complete(self) -> bool:
+        """Atomically let the active winner claim completion publication."""
+        with self._lock:
+            if self._state != "active":
+                return False
+            self._state = "completed"
+            return True
+
+    def mark_event(self, timestamp: float | None = None) -> bool:
+        with self._lock:
+            if self._state != "active":
+                return False
+            self._last_event_ts = time.time() if timestamp is None else timestamp
+            return True
+
+    def last_event_ts(self) -> float | None:
+        with self._lock:
+            return self._last_event_ts
+
+    def deactivate_if_no_event(self) -> bool:
+        """Atomically claim a no-first-event timeout."""
+        with self._lock:
+            if self._state != "active" or self._last_event_ts is not None:
+                return False
+            self._state = "cancelled"
+            return True
+
+    def claim_event_stale_timeout(self, now: float, timeout: float) -> float | None:
+        """Atomically claim an idle timeout and return the observed idle age."""
+        with self._lock:
+            if self._state != "active" or self._last_event_ts is None:
+                return None
+            elapsed = now - self._last_event_ts
+            if elapsed <= timeout:
+                return None
+            self._state = "cancelled"
+            return elapsed
 
 
 def _codex_note_to_tool_progress(note: dict) -> tuple[str, str, dict] | None:
@@ -814,7 +927,13 @@ def _consume_codex_event_stream(
     return final
 
 
-def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta=None):
+def run_codex_stream(
+    agent,
+    api_kwargs: dict,
+    client: Any = None,
+    on_first_delta=None,
+    request_guard: CodexRequestGuard | None = None,
+):
     """Execute one streaming Responses API request and return the final response.
 
     Uses ``responses.create(stream=True)`` (low-level raw event iteration)
@@ -825,28 +944,67 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     """
     import httpx as _httpx
 
+    if request_guard is not None:
+        if client is None:
+            raise ValueError("guarded Codex stream requires a request-local client")
+        if not request_guard.is_active():
+            raise InterruptedError("Codex stream request became obsolete before start")
+
     active_client = client or agent._ensure_primary_openai_client(reason="codex_stream_direct")
+    if request_guard is not None and not request_guard.is_active():
+        raise InterruptedError("Codex stream request became obsolete during startup")
+
     max_stream_retries = 1
-    # Accumulate streamed text so callers / compat shims can read it.
-    agent._codex_streamed_text_parts: list = []
+    streamed_text_parts: list[str] = []
+    # Legacy direct callers expose this list on the agent. Guarded workers keep
+    # it request-local so a delayed old worker cannot overwrite a newer retry's
+    # compatibility pointer.
+    if request_guard is None:
+        agent._codex_streamed_text_parts = streamed_text_parts
+
+    def _finish_response(response):
+        if request_guard is not None:
+            if not request_guard.complete():
+                raise InterruptedError("Codex stream request became obsolete before completion")
+            agent._codex_streamed_text_parts = streamed_text_parts
+        return response
+
+    def _callback_allowed() -> bool:
+        return request_guard is None or request_guard.is_active()
 
     def _on_text_delta(text: str) -> None:
-        agent._codex_streamed_text_parts.append(text)
-        agent._fire_stream_delta(text)
+        if not _callback_allowed():
+            return
+        streamed_text_parts.append(text)
+        if _callback_allowed():
+            agent._fire_stream_delta(text)
 
     def _on_reasoning_delta(text: str) -> None:
-        agent._fire_reasoning_delta(text)
+        if _callback_allowed():
+            agent._fire_reasoning_delta(text)
+
+    def _on_first_delta() -> None:
+        if on_first_delta is not None and _callback_allowed():
+            on_first_delta()
 
     def _on_event(event: Any) -> None:
-        # TTFB watchdog and activity touch — runs once per SSE event.
-        agent._codex_stream_last_event_ts = time.time()
+        event_ts = time.time()
+        if request_guard is not None:
+            if not request_guard.mark_event(event_ts):
+                return
+        else:
+            agent._codex_stream_last_event_ts = event_ts
         agent._touch_activity("receiving stream response")
 
     def _interrupt_check() -> bool:
-        return bool(agent._interrupt_requested)
+        return bool(agent._interrupt_requested) or (
+            request_guard is not None and not request_guard.is_active()
+        )
 
     for attempt in range(max_stream_retries + 1):
-        if agent._interrupt_requested:
+        if agent._interrupt_requested or (
+            request_guard is not None and not request_guard.is_active()
+        ):
             raise InterruptedError("Agent interrupted before Codex stream retry")
 
         stream_kwargs = dict(api_kwargs)
@@ -868,7 +1026,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             # Compatibility: some mocks/providers return a concrete response
             # instead of an iterable.  Pass it straight through.
             if hasattr(event_stream, "output") and not hasattr(event_stream, "__iter__"):
-                return event_stream
+                return _finish_response(event_stream)
 
             try:
                 final = _consume_codex_event_stream(
@@ -876,7 +1034,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     model=api_kwargs.get("model"),
                     on_text_delta=_on_text_delta,
                     on_reasoning_delta=_on_reasoning_delta,
-                    on_first_delta=on_first_delta,
+                    on_first_delta=_on_first_delta,
                     on_event=_on_event,
                     interrupt_check=_interrupt_check,
                 )
@@ -896,11 +1054,11 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     "Codex Responses stream terminal status=%s "
                     "(incomplete_details=%s, error=%s, streamed_chars=%d). %s",
                     final.status, final.incomplete_details, final.error,
-                    sum(len(p) for p in agent._codex_streamed_text_parts),
+                    sum(len(p) for p in streamed_text_parts),
                     agent._client_log_context(),
                 )
 
-            return final
+            return _finish_response(final)
         finally:
             close_fn = getattr(event_stream, "close", None)
             if callable(close_fn):
@@ -923,6 +1081,7 @@ def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None
 
 
 __all__ = [
+    "CodexRequestGuard",
     "run_codex_app_server_turn",
     "run_codex_stream",
     "run_codex_create_stream_fallback",

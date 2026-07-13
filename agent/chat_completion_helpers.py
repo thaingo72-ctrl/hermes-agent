@@ -147,6 +147,17 @@ def openai_codex_stale_timeout_floor(est_tokens: int) -> float:
     return 0.0
 
 
+def openai_codex_ttfb_timeout_default(_est_tokens: int) -> float:
+    """Fail fast on zero-event Codex streams regardless of context size.
+
+    Live probes show healthy 100k+ token requests reaching first byte in a few
+    seconds while dead connections remain silent until killed. Context size is
+    therefore not a useful stall discriminator; the outer retry is the safer
+    recovery path.
+    """
+    return 45.0
+
+
 def _validated_openrouter_provider_sort(raw_sort: Any) -> Optional[str]:
     """Return a normalized OpenRouter provider.sort value or None."""
     if not isinstance(raw_sort, str):
@@ -269,6 +280,26 @@ def interruptible_api_call(agent, api_kwargs: dict):
     # a network bug and surfaced to the caller. (PR #6600 — cascading interrupt
     # hang.)
     _request_cancelled = {"value": False}
+    _codex_request_guard = None
+    if agent.api_mode == "codex_responses":
+        from agent.codex_runtime import CodexRequestGuard
+
+        _codex_request_guard = CodexRequestGuard()
+
+    def _deactivate_codex_request_guard() -> bool:
+        if _codex_request_guard is None:
+            return True
+        return _codex_request_guard.deactivate()
+
+    def _codex_last_event_ts():
+        if _codex_request_guard is not None:
+            return _codex_request_guard.last_event_ts()
+        return getattr(agent, "_codex_stream_last_event_ts", None)
+
+    def _claim_codex_ttfb_timeout() -> bool:
+        if _codex_request_guard is not None:
+            return _codex_request_guard.deactivate_if_no_event()
+        return getattr(agent, "_codex_stream_last_event_ts", None) is None
 
     def _set_request_client(client):
         with request_client_lock:
@@ -292,38 +323,58 @@ def interruptible_api_call(agent, api_kwargs: dict):
         # just-closed TLS socket FD to ``kanban.db``, and the still-live SSL
         # BIO on the worker thread then wrote a 24-byte TLS application-data
         # record into the SQLite header (#29507).
-        with request_client_lock:
-            request_client = request_client_holder.get("client")
-            owner_tid = request_client_holder.get("owner_tid")
-            stranger_thread = (
-                request_client is not None
-                and owner_tid is not None
-                and owner_tid != threading.get_ident()
+        if _codex_request_guard is not None:
+            request_client, stranger_thread = _codex_request_guard.client_for_close(
+                threading.get_ident()
             )
-            if not stranger_thread:
-                # Owning thread (or no recorded owner) → pop and fully close.
-                request_client_holder["client"] = None
-                request_client_holder["owner_tid"] = None
+        else:
+            with request_client_lock:
+                request_client = request_client_holder.get("client")
+                owner_tid = request_client_holder.get("owner_tid")
+                stranger_thread = (
+                    request_client is not None
+                    and owner_tid is not None
+                    and owner_tid != threading.get_ident()
+                )
+                if not stranger_thread:
+                    # Owning thread (or no recorded owner) → pop and fully close.
+                    request_client_holder["client"] = None
+                    request_client_holder["owner_tid"] = None
         if request_client is None:
             return
         if stranger_thread:
-            agent._abort_request_openai_client(request_client, reason=reason)
+            try:
+                agent._abort_request_openai_client(request_client, reason=reason)
+            finally:
+                if _codex_request_guard is not None:
+                    _codex_request_guard.finish_stranger_abort(request_client)
         else:
             agent._close_request_openai_client(request_client, reason=reason)
 
     def _call():
         try:
             if agent.api_mode == "codex_responses":
-                request_client = _set_request_client(
-                    agent._create_request_openai_client(
-                        reason="codex_stream_request",
-                        api_kwargs=api_kwargs,
-                    )
+                assert _codex_request_guard is not None
+                if not _codex_request_guard.is_active():
+                    raise InterruptedError("Codex request became obsolete before client creation")
+                request_client = agent._create_request_openai_client(
+                    reason="codex_stream_request",
+                    api_kwargs=api_kwargs,
                 )
+                if not _codex_request_guard.register_client(
+                    request_client, threading.get_ident()
+                ):
+                    agent._close_request_openai_client(
+                        request_client, reason="codex_obsolete_before_register"
+                    )
+                    raise InterruptedError(
+                        "Codex request became obsolete during client creation"
+                    )
                 result["response"] = agent._run_codex_stream(
                     api_kwargs,
                     client=request_client,
                     on_first_delta=getattr(agent, "_codex_on_first_delta", None),
+                    request_guard=_codex_request_guard,
                 )
             elif agent.api_mode == "anthropic_messages":
                 result["response"] = agent._anthropic_messages_create(api_kwargs)
@@ -396,8 +447,8 @@ def interruptible_api_call(agent, api_kwargs: dict):
     # stream event has arrived yet we apply a much shorter TTFB cutoff so the
     # main retry loop can reconnect promptly. Large subscription-backed Codex
     # requests can legitimately spend tens of seconds in backend admission /
-    # prompt prefill before the first SSE event, so the no-byte TTFB watchdog
-    # is disabled for large chatgpt.com/backend-api/codex requests. A second
+    # prompt prefill before the first SSE event, so the no-byte TTFB cutoff is
+    # generous but flat; live probes show context size does not predict stalls. A second
     # failure mode emits an opening SSE frame and then stalls forever in SSL
     # read; for that we watch the gap since the last Codex stream event. This
     # matches Codex CLI's stream_idle_timeout model: any valid SSE event is
@@ -423,16 +474,23 @@ def interruptible_api_call(agent, api_kwargs: dict):
     # No-byte TTFB cutoff. The OpenAI SDK's own streaming read timeout is far
     # longer (openai 2.x DEFAULT_TIMEOUT.read = 600s), so a tight 12s default
     # killed subscription-backed Codex requests mid-prefill before the backend
-    # had a chance to emit its first SSE event. Default to 120s — long enough to
-    # clear normal backend admission / prompt prefill, short enough to still
-    # reconnect promptly when the socket is genuinely wedged. Set
+    # had a chance to emit its first SSE event. Use a flat 45s cutoff: healthy
+    # large-context requests reach first byte quickly in live probes, while
+    # dead connections stay silent until killed. The outer retry then reconnects
+    # without making interactive users wait several minutes. Set
     # HERMES_CODEX_TTFB_TIMEOUT_SECONDS=0 to disable this watchdog entirely.
     _ttfb_enabled = _codex_watchdog_enabled
-    _ttfb_timeout = _env_float("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", 120.0)
+    _ttfb_timeout = _env_float(
+        "HERMES_CODEX_TTFB_TIMEOUT_SECONDS",
+        openai_codex_ttfb_timeout_default(_est_tokens_for_codex_watchdog),
+    )
     if _ttfb_timeout <= 0:
         _ttfb_enabled = False
     elif _openai_codex_backend:
-        _ttfb_disable_above = _env_float("HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS", 10_000.0)
+        # Keep zero-event recovery enabled at every context size by default.
+        # Operators with an unusually slow backend can explicitly restore a
+        # size gate, while STRICT remains an override for that opt-out.
+        _ttfb_disable_above = _env_float("HERMES_CODEX_TTFB_DISABLE_ABOVE_TOKENS", 0.0)
         _ttfb_strict = os.environ.get("HERMES_CODEX_TTFB_STRICT", "").strip().lower() in {
             "1", "true", "yes", "on"
         }
@@ -450,7 +508,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 _ttfb_disable_above,
             )
         else:
-            _ttfb_cap = _env_float("HERMES_CODEX_TTFB_MAX_SECONDS", 120.0)
+            _ttfb_cap = _env_float("HERMES_CODEX_TTFB_MAX_SECONDS", 240.0)
             if _ttfb_cap > 0 and _ttfb_timeout > _ttfb_cap:
                 logger.info(
                     "Capping openai-codex no-byte TTFB timeout from %.0fs to %.0fs "
@@ -470,8 +528,8 @@ def interruptible_api_call(agent, api_kwargs: dict):
         _codex_idle_enabled = False
 
     if _codex_watchdog_enabled:
-        # Reset before the worker starts so a marker left over from a previous
-        # call on this agent can't be misread as first-byte for this one.
+        # Reset the compatibility markers. Worker lifecycle itself is protected
+        # by the request-local guard created before the worker starts.
         agent._codex_stream_last_event_ts = None
         agent._codex_stream_last_progress_ts = None
 
@@ -503,7 +561,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
         if (
             _ttfb_enabled
             and _elapsed > _ttfb_timeout
-            and getattr(agent, "_codex_stream_last_event_ts", None) is None
+            and _claim_codex_ttfb_timeout()
         ):
             _silent_hint: Optional[str] = None
             _hint_fn = getattr(agent, "_codex_silent_hang_hint", None)
@@ -531,6 +589,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     f"(codex stream, model: {api_kwargs.get('model', 'unknown')}). "
                     f"Reconnecting."
                 )
+            _deactivate_codex_request_guard()
             try:
                 _close_request_client_once("codex_ttfb_kill")
             except Exception:
@@ -555,14 +614,19 @@ def interruptible_api_call(agent, api_kwargs: dict):
 
         # Stream-idle detector: the Codex backend emitted at least one SSE
         # frame, then stopped emitting events. Valid keepalive / in_progress
-        # frames refresh _codex_stream_last_event_ts and should not be killed.
-        _last_codex_event_ts = getattr(agent, "_codex_stream_last_event_ts", None)
-        if (
-            _codex_idle_enabled
-            and _last_codex_event_ts is not None
-            and (time.time() - _last_codex_event_ts) > _codex_idle_timeout
-        ):
-            _event_stale_elapsed = time.time() - _last_codex_event_ts
+        # frames refresh the request-local event timestamp and should not be killed.
+        _last_codex_event_ts = _codex_last_event_ts()
+        _event_stale_elapsed = None
+        if _codex_idle_enabled and _last_codex_event_ts is not None:
+            if _codex_request_guard is not None:
+                _event_stale_elapsed = _codex_request_guard.claim_event_stale_timeout(
+                    time.time(), _codex_idle_timeout
+                )
+            else:
+                _candidate_idle = time.time() - _last_codex_event_ts
+                if _candidate_idle > _codex_idle_timeout:
+                    _event_stale_elapsed = _candidate_idle
+        if _event_stale_elapsed is not None:
             logger.warning(
                 "Codex stream produced no SSE events for %.0fs after first byte "
                 "(threshold %.0fs, model=%s, context=~%s tokens). Killing "
@@ -577,6 +641,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 f"after first byte (model: {api_kwargs.get('model', 'unknown')}). "
                 f"Reconnecting."
             )
+            _deactivate_codex_request_guard()
             try:
                 _close_request_client_once("codex_stream_idle_kill")
             except Exception:
@@ -621,6 +686,9 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     f"(non-streaming, model: {api_kwargs.get('model', 'unknown')}). "
                     f"Aborting call."
                 )
+            if _codex_request_guard is not None and not _deactivate_codex_request_guard():
+                continue
+            _deactivate_codex_request_guard()
             try:
                 if agent.api_mode == "anthropic_messages":
                     agent._anthropic_client.close()
@@ -656,6 +724,8 @@ def interruptible_api_call(agent, api_kwargs: dict):
             # exception handler recognizes the forced transport error as a
             # cancel and exits cleanly instead of surfacing a network error or
             # (in the streaming path) burning full retry cycles. (#6600)
+            if _codex_request_guard is not None and not _deactivate_codex_request_guard():
+                continue
             _request_cancelled["value"] = True
             logger.debug(
                 "Force-closing httpx client due to interrupt (not a network error)."
