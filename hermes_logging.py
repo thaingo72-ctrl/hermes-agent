@@ -413,17 +413,15 @@ def setup_verbose_logging() -> None:
 # ---------------------------------------------------------------------------
 
 class _ManagedRotatingFileHandler(RotatingFileHandler):
-    """RotatingFileHandler that ensures group-writable perms in managed mode
-    AND survives external rotation.
+    """RotatingFileHandler with explicit secure permissions and external-rotation recovery.
 
     Two responsibilities:
 
-    1.  In managed mode (NixOS), the stateDir uses setgid (2770) so new files
-        inherit the hermes group. However, both ``_open()`` (initial creation)
-        and ``doRollover()`` create files via ``open()``, which uses the
-        process umask — typically 0022, producing 0644. This subclass applies
-        ``chmod 0660`` after both operations so the gateway and interactive
-        users can share log files.
+    1.  Apply deterministic permissions after initial creation and rollover:
+        ``0600`` for normal single-user installs and ``0660`` for managed
+        multi-user installs. This avoids the process umask silently creating
+        world-readable ``0644`` logs on macOS/Linux while preserving the
+        managed-mode shared-group contract.
 
     2.  ``RotatingFileHandler`` keeps an open file descriptor.  If anything
         rotates the file *externally* (``logrotate``, manual ``mv``,
@@ -447,12 +445,11 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         self._stat_ino: Optional[int] = None
         self._record_stream_stat()
 
-    def _chmod_if_managed(self):
-        if self._managed:
-            try:
-                os.chmod(self.baseFilename, 0o660)
-            except OSError:
-                pass
+    def _apply_permissions(self):
+        try:
+            os.chmod(self.baseFilename, 0o660 if self._managed else 0o600)
+        except OSError:
+            pass
 
     def _record_stream_stat(self) -> None:
         """Snapshot dev/ino of ``baseFilename`` so we can detect external rotation."""
@@ -536,12 +533,12 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
 
     def _open(self):
         stream = super()._open()
-        self._chmod_if_managed()
+        self._apply_permissions()
         return stream
 
     def doRollover(self):
         super().doRollover()
-        self._chmod_if_managed()
+        self._apply_permissions()
         # Our own rollover writes a new baseFilename; refresh the snapshot
         # so the next emit doesn't mistake it for external rotation.
         self._record_stream_stat()
