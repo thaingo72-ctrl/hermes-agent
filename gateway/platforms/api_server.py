@@ -2786,6 +2786,20 @@ class APIServerAdapter(BasePlatformAdapter):
         if auth_err:
             return auth_err
 
+        # Delegation isolation is config-dependent, so it is computed live —
+        # the flags must track what delegate_task would actually enforce right
+        # now, never a stale snapshot. Failure to import/read config reads as
+        # "no isolation" so a broken environment can never over-claim safety.
+        try:
+            from tools.delegate_tool import delegation_isolation_state
+
+            isolation = delegation_isolation_state()
+        except Exception:
+            isolation = {
+                "safe_delegation_isolation": False,
+                "delegation_mcp_isolation": False,
+            }
+
         return web.json_response({
             "object": "hermes.api_server.capabilities",
             "platform": "hermes-agent",
@@ -2816,6 +2830,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "run_approval_response": True,
                 "tool_progress_events": True,
                 "approval_events": True,
+                "safe_delegation_isolation": isolation["safe_delegation_isolation"],
+                "delegation_mcp_isolation": isolation["delegation_mcp_isolation"],
                 "session_resources": True,
                 "model_options": True,
                 "session_chat": True,
