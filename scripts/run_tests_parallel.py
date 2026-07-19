@@ -44,6 +44,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
@@ -233,6 +234,7 @@ def _run_one_file(
     pytest_args: List[str],
     repo_root: Path,
     file_timeout: float,
+    isolated_hermes_home: Path,
     retries: int = 0,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Run ``python -m pytest <file> <pytest_args>`` in a fresh subprocess.
@@ -268,14 +270,14 @@ def _run_one_file(
     bound a pathologically slow or hung file as a whole.
     """
     file, rc, output, summary, subproc_wall = _run_one_file_once(
-        file, pytest_args, repo_root, file_timeout
+        file, pytest_args, repo_root, file_timeout, isolated_hermes_home
     )
     attempt = 0
     while rc != 0 and attempt < retries:
         attempt += 1
         first_output = output
         file, rc, output, summary, subproc_wall2 = _run_one_file_once(
-            file, pytest_args, repo_root, file_timeout
+            file, pytest_args, repo_root, file_timeout, isolated_hermes_home
         )
         subproc_wall += subproc_wall2
         if rc == 0:
@@ -303,10 +305,17 @@ def _run_one_file_once(
     pytest_args: List[str],
     repo_root: Path,
     file_timeout: float,
+    isolated_hermes_home: Path,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
     cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
-    
+
+    # Pytest fixtures run after collection. Modules such as cron.jobs resolve
+    # HERMES_HOME into module-level storage paths during import, so bind the
+    # per-file isolated home before Python starts.
+    child_env = os.environ.copy()
+    child_env["HERMES_HOME"] = str(isolated_hermes_home)
+
     subproc_start = time.monotonic()
     # launch the pytest process
     proc = subprocess.Popen(
@@ -315,7 +324,7 @@ def _run_one_file_once(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace",
-        env=os.environ,
+        env=child_env,
         # POSIX: place the child at the head of its own process group so
         # _kill_tree can SIGKILL the group atomically.
         # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
@@ -358,7 +367,7 @@ def _run_one_file_once(
         # case it left grandchildren behind; already-dead is a no-op.
         _kill_tree(proc, pgid=pgid)
 
-        output +=  "\n"
+        output += "\n"
 
     if rc == 5:
         # No tests collected in THIS file — legitimate per-file: a
@@ -991,21 +1000,35 @@ def main() -> int:
             if rc != 0:
                 _print_inline_failure(fpath, output, repo_root, pytest_passthrough)
 
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures: List[Future] = []
-        for file in files:
-            t0 = time.monotonic()
-            fut = pool.submit(
-                _run_one_file, file, pytest_passthrough, repo_root,
-                args.file_timeout, args.file_retries,
-            )
-            fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
-            futures.append(fut)
-        # Block until everything's done. ThreadPoolExecutor.__exit__ waits
-        # for all submitted work, but doing it explicitly here makes the
-        # control flow obvious.
-        for fut in futures:
-            fut.result() if fut.exception() is None else None
+    # One unique HERMES_HOME per file protects collection-time imports and
+    # prevents parallel files from sharing pre-fixture state. The run root is
+    # removed only after every child process tree has exited.
+    with tempfile.TemporaryDirectory(
+        prefix="hermes-test-run-",
+        ignore_cleanup_errors=True,
+    ) as isolation_root:
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            futures: List[Future] = []
+            for file_index, file in enumerate(files):
+                file_home = Path(isolation_root) / str(file_index)
+                file_home.mkdir()
+                t0 = time.monotonic()
+                fut = pool.submit(
+                    _run_one_file,
+                    file,
+                    pytest_passthrough,
+                    repo_root,
+                    args.file_timeout,
+                    file_home,
+                    args.file_retries,
+                )
+                fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
+                futures.append(fut)
+            # Block until everything's done. ThreadPoolExecutor.__exit__ waits
+            # for all submitted work, but doing it explicitly here makes the
+            # control flow obvious.
+            for fut in futures:
+                fut.result() if fut.exception() is None else None
 
     elapsed = time.monotonic() - started
     print()

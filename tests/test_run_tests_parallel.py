@@ -279,6 +279,71 @@ def test_positional_path_not_treated_as_flag(tmp_path: Path) -> None:
     assert "test_flagprobe.py" in proc.stdout, proc.stdout
 
 
+def test_runner_isolates_hermes_home_before_test_collection(tmp_path: Path) -> None:
+    """Import-time cron writes must not fall back to the developer's home.
+
+    Pytest's autouse fixture redirects HERMES_HOME only after collection.
+    Modules such as ``cron.jobs`` freeze their default paths at import time,
+    so the per-file runner must bind an isolated HERMES_HOME before it starts
+    pytest rather than relying on that fixture.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    fake_user_home = tmp_path / "developer-home"
+    fallback_jobs = fake_user_home / ".hermes" / "cron" / "jobs.json"
+    probe_dir = tmp_path / "cron-import-probe"
+    probe_dir.mkdir()
+    (probe_dir / "test_cron_import_write.py").write_text(
+        textwrap.dedent(
+            f"""
+            from pathlib import Path
+
+            from cron.jobs import JOBS_FILE, create_job
+
+            FALLBACK_JOBS = Path({str(fallback_jobs)!r})
+            create_job(
+                prompt="runner isolation probe",
+                schedule="every 1h",
+                name="runner isolation probe",
+            )
+
+
+            def test_import_time_cron_write_uses_runner_home():
+                assert JOBS_FILE.resolve() != FALLBACK_JOBS.resolve()
+            """
+        )
+    )
+
+    env = os.environ.copy()
+    env.pop("HERMES_HOME", None)
+    env["HOME"] = str(fake_user_home)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--paths",
+            str(probe_dir),
+            "-j",
+            "1",
+            "--file-timeout",
+            "30",
+            "-q",
+        ],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stdout
+    assert not fallback_jobs.exists(), (
+        "collection-time cron write escaped to the developer-home fallback: "
+        f"{fallback_jobs}"
+    )
+
+
 def test_file_retry_self_heals_and_prints_both_attempts(tmp_path: Path) -> None:
     """A pass-on-retry is green, loud, and retains the failing traceback."""
     repo_root = Path(__file__).resolve().parent.parent
