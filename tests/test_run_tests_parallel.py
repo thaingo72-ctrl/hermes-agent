@@ -27,8 +27,10 @@ import signal
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -470,6 +472,33 @@ def test_timeout_cleans_collection_home(tmp_path: Path) -> None:
     isolated_home = Path(home_marker.read_text())
     assert not isolated_home.exists()
     assert not (caller_home / "cron" / "jobs.json").exists()
+
+
+def test_repeated_signal_does_not_reenter_active_cleanup(monkeypatch) -> None:
+    """A nested second signal must not reacquire the active-process lock."""
+    from scripts import run_tests_parallel as runner_mod
+
+    shutdown_requested = threading.Event()
+    active_processes_lock = threading.Lock()
+    fake_proc: Any = object()
+    active_processes: dict[int, tuple[Any, int | None]] = {1: (fake_proc, None)}
+    controller = runner_mod._ShutdownController(
+        shutdown_requested,
+        active_processes,
+        active_processes_lock,
+    )
+    killed = []
+
+    def reentrant_kill(proc, pgid=None):
+        killed.append((proc, pgid))
+        controller.handle_signal(signal.SIGINT, None)
+
+    monkeypatch.setattr(runner_mod, "_kill_tree", reentrant_kill)
+    controller.handle_signal(signal.SIGTERM, None)
+
+    assert shutdown_requested.is_set()
+    assert controller.received_signal == signal.SIGTERM
+    assert killed == [(fake_proc, None)]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal/process-group probe")

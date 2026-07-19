@@ -231,6 +231,34 @@ def _kill_tree(proc: "subprocess.Popen", pgid: int | None = None) -> None:
         pass
 
 
+class _ShutdownController:
+    """Idempotent signal cleanup for active per-file pytest processes."""
+
+    def __init__(
+        self,
+        shutdown_requested: threading.Event,
+        active_processes: dict[int, tuple[Any, int | None]],
+        active_processes_lock: threading.Lock,
+    ) -> None:
+        self.shutdown_requested = shutdown_requested
+        self.active_processes = active_processes
+        self.active_processes_lock = active_processes_lock
+        self.received_signal: int | None = None
+
+    def handle_signal(self, signum: int, _frame: object) -> None:
+        # Python signal handlers can nest. Mark receipt before acquiring the
+        # non-reentrant registry lock so a repeated SIGINT/SIGTERM returns
+        # immediately instead of self-deadlocking inside the first handler.
+        if self.received_signal is not None:
+            return
+        self.received_signal = signum
+        self.shutdown_requested.set()
+        with self.active_processes_lock:
+            processes = list(self.active_processes.values())
+        for proc, pgid in processes:
+            _kill_tree(proc, pgid=pgid)
+
+
 def _run_one_file(
     file: Path,
     pytest_args: List[str],
@@ -1041,23 +1069,17 @@ def main() -> int:
     shutdown_requested = threading.Event()
     active_processes: dict[int, tuple[subprocess.Popen, int | None]] = {}
     active_processes_lock = threading.Lock()
-    received_signal: int | None = None
-
-    def _handle_signal(signum: int, _frame: object) -> None:
-        nonlocal received_signal
-        if received_signal is None:
-            received_signal = signum
-        shutdown_requested.set()
-        with active_processes_lock:
-            processes = list(active_processes.values())
-        for proc, pgid in processes:
-            _kill_tree(proc, pgid=pgid)
+    shutdown_controller = _ShutdownController(
+        shutdown_requested,
+        active_processes,
+        active_processes_lock,
+    )
 
     previous_handlers: dict[int, Any] = {}
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             previous_handlers[sig] = signal.getsignal(sig)
-            signal.signal(sig, _handle_signal)
+            signal.signal(sig, shutdown_controller.handle_signal)
         except (OSError, ValueError):
             pass
 
@@ -1091,9 +1113,12 @@ def main() -> int:
                 # control flow obvious.
                 for fut in futures:
                     fut.result() if fut.exception() is None else None
-        if received_signal is not None:
-            print(f"Interrupted by signal {received_signal}; active test trees cleaned up")
-            return 128 + received_signal
+        if shutdown_controller.received_signal is not None:
+            print(
+                f"Interrupted by signal {shutdown_controller.received_signal}; "
+                "active test trees cleaned up"
+            )
+            return 128 + shutdown_controller.received_signal
     finally:
         for sig, previous_handler in previous_handlers.items():
             signal.signal(sig, previous_handler)
