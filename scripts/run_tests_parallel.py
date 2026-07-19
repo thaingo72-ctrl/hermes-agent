@@ -33,6 +33,7 @@ Usage:
 Environment:
     HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
     HERMES_TEST_PATHS    Override discovery roots (colon-sep, default: 'tests')
+    HERMES_HOME          Always replaced with a unique temporary home per file
 
 Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 """
@@ -42,13 +43,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 # Default test discovery roots.
@@ -228,56 +231,85 @@ def _kill_tree(proc: "subprocess.Popen", pgid: int | None = None) -> None:
         pass
 
 
+class _ShutdownController:
+    """Idempotent signal cleanup for active per-file pytest processes."""
+
+    def __init__(
+        self,
+        shutdown_requested: threading.Event,
+        active_processes: dict[int, tuple[Any, int | None]],
+        active_processes_lock: threading.Lock,
+    ) -> None:
+        self.shutdown_requested = shutdown_requested
+        self.active_processes = active_processes
+        self.active_processes_lock = active_processes_lock
+        self.received_signal: int | None = None
+
+    def handle_signal(self, signum: int, _frame: object) -> None:
+        # Python signal handlers can nest. Mark receipt before acquiring the
+        # non-reentrant registry lock so a repeated SIGINT/SIGTERM returns
+        # immediately instead of self-deadlocking inside the first handler.
+        if self.received_signal is not None:
+            return
+        self.received_signal = signum
+        self.shutdown_requested.set()
+        with self.active_processes_lock:
+            processes = list(self.active_processes.values())
+        for proc, pgid in processes:
+            _kill_tree(proc, pgid=pgid)
+
+
+# Files that failed once and passed on retry, with both attempts' output.
+# Keeping the traceback is load-bearing: a self-healed flake without its
+# failing assertion is only a filename, which forces another expensive full
+# run to rediscover the race.
+_FLAKY_RESULTS: List[Tuple[Path, str]] = []
+_flaky_lock = threading.Lock()
+
+
 def _run_one_file(
     file: Path,
     pytest_args: List[str],
     repo_root: Path,
     file_timeout: float,
+    isolated_hermes_home: Path,
+    shutdown_requested: threading.Event,
+    active_processes: dict[int, tuple[subprocess.Popen, int | None]],
+    active_processes_lock: threading.Lock,
     retries: int = 0,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
-    """Run ``python -m pytest <file> <pytest_args>`` in a fresh subprocess.
+    """Run one test file, retrying failures in fresh subprocesses when asked.
 
-    Returns (file, returncode, captured_combined_output, summary_counts, subprocess_wall_seconds).
-
-    ``retries`` > 0 enables the one-shot flake retry: a non-zero exit is
-    re-run in a fresh subprocess; if the re-run passes, the file counts as
-    passed but the output is prefixed with a FLAKY banner and the file/output
-    are recorded in ``_FLAKY_RESULTS`` so the summary can call it out. A
-    deterministic failure fails every attempt, so real regressions cannot
-    be laundered green.
-
-    ``summary_counts`` is the result of ``_parse_pytest_summary(output)`` —
-
-    pytest exit codes (https://docs.pytest.org/en/stable/reference/exit-codes.html):
-        0 = all tests passed
-        1 = some tests failed
-        2 = test execution interrupted
-        3 = internal error
-        4 = pytest CLI usage error
-        5 = no tests collected
-
-    We treat exit 5 as a pass: it just means every test in the file was
-    skipped or filtered by a marker (e.g. ``-m 'not integration'`` skips
-    files where every test is marked integration). That's intentional and
-    not a failure mode.
-
-    On per-file timeout (``file_timeout`` seconds) or any other exception
-    during ``communicate()``, we kill the whole process group / process
-    tree so grandchildren (uvicorn servers, async runtimes, etc.) do not
-    orphan onto PID 1. This outer timeout exists only to
-    bound a pathologically slow or hung file as a whole.
+    The same per-file isolated HERMES_HOME is retained across attempts. Each
+    attempt still gets a fresh Python process and is registered with the
+    shutdown controller so signals and timeouts clean the full process tree.
     """
-    file, rc, output, summary, subproc_wall = _run_one_file_once(
-        file, pytest_args, repo_root, file_timeout
+    result = _run_one_file_once(
+        file,
+        pytest_args,
+        repo_root,
+        file_timeout,
+        isolated_hermes_home,
+        shutdown_requested,
+        active_processes,
+        active_processes_lock,
     )
+    file, rc, output, summary, subproc_wall = result
     attempt = 0
-    while rc != 0 and attempt < retries:
+    while rc != 0 and attempt < retries and not shutdown_requested.is_set():
         attempt += 1
         first_output = output
-        file, rc, output, summary, subproc_wall2 = _run_one_file_once(
-            file, pytest_args, repo_root, file_timeout
+        file, rc, output, summary, retry_wall = _run_one_file_once(
+            file,
+            pytest_args,
+            repo_root,
+            file_timeout,
+            isolated_hermes_home,
+            shutdown_requested,
+            active_processes,
+            active_processes_lock,
         )
-        subproc_wall += subproc_wall2
+        subproc_wall += retry_wall
         if rc == 0:
             output = (
                 f"⚠ FLAKY: failed on attempt 1, passed on retry "
@@ -290,36 +322,41 @@ def _run_one_file(
     return file, rc, output, summary, subproc_wall
 
 
-# Files that failed once and passed on retry, with both attempts' output.
-# Keeping the traceback is load-bearing: a self-healed flake without its
-# failing assertion is only a filename, which forces another expensive full
-# run to rediscover the race.
-_FLAKY_RESULTS: List[Tuple[Path, str]] = []
-_flaky_lock = threading.Lock()
-
-
 def _run_one_file_once(
     file: Path,
     pytest_args: List[str],
     repo_root: Path,
     file_timeout: float,
+    isolated_hermes_home: Path,
+    shutdown_requested: threading.Event,
+    active_processes: dict[int, tuple[subprocess.Popen, int | None]],
+    active_processes_lock: threading.Lock,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
-    """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
+    """Run one per-file pytest subprocess with isolation and lifecycle guards."""
+    if shutdown_requested.is_set():
+        return file, 130, "runner interrupted before file started\n", {}, 0.0
+
     cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
-    
+
+    # Pytest fixtures run after collection. Modules such as cron.jobs resolve
+    # HERMES_HOME into module-level storage paths during import, so bind the
+    # per-file isolated home before Python starts.
+    child_env = os.environ.copy()
+    child_env["HERMES_HOME"] = str(isolated_hermes_home)
+
     subproc_start = time.monotonic()
-    # launch the pytest process
     proc = subprocess.Popen(
         cmd,
         cwd=repo_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        env=os.environ,
+        env=child_env,
         # POSIX: place the child at the head of its own process group so
         # _kill_tree can SIGKILL the group atomically.
-        # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
-        # _kill_tree handles the Windows path via taskkill /F /T.
+        # Windows: start_new_session is ignored by CPython; _kill_tree uses
+        # taskkill /F /T while the pytest leader is still alive. Descendant
+        # cleanup after an already-exited leader remains best-effort there.
         start_new_session=True,
     )
 
@@ -333,6 +370,12 @@ def _run_one_file_once(
             pgid = os.getpgid(proc.pid)
         except (ProcessLookupError, PermissionError):
             pgid = None
+
+    with active_processes_lock:
+        active_processes[proc.pid] = (proc, pgid)
+        stop_after_register = shutdown_requested.is_set()
+    if stop_after_register:
+        _kill_tree(proc, pgid=pgid)
 
     try:
         output, _ = proc.communicate(timeout=file_timeout)
@@ -357,8 +400,10 @@ def _run_one_file_once(
         # Happy path: pytest exited on its own. Kill the group anyway in
         # case it left grandchildren behind; already-dead is a no-op.
         _kill_tree(proc, pgid=pgid)
-
-        output +=  "\n"
+        output += "\n"
+    finally:
+        with active_processes_lock:
+            active_processes.pop(proc.pid, None)
 
     if rc == 5:
         # No tests collected — every test in the file was filtered out.
@@ -938,21 +983,65 @@ def main() -> int:
             if rc != 0:
                 _print_inline_failure(fpath, output, repo_root, pytest_passthrough)
 
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures: List[Future] = []
-        for file in files:
-            t0 = time.monotonic()
-            fut = pool.submit(
-                _run_one_file, file, pytest_passthrough, repo_root,
-                args.file_timeout, args.file_retries,
+    # One unique HERMES_HOME per file protects collection-time imports and
+    # prevents parallel files from sharing pre-fixture state. The run root is
+    # removed only after every child process tree has exited.
+    shutdown_requested = threading.Event()
+    active_processes: dict[int, tuple[subprocess.Popen, int | None]] = {}
+    active_processes_lock = threading.Lock()
+    shutdown_controller = _ShutdownController(
+        shutdown_requested,
+        active_processes,
+        active_processes_lock,
+    )
+
+    previous_handlers: dict[int, Any] = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, shutdown_controller.handle_signal)
+        except (OSError, ValueError):
+            pass
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="hermes-test-run-",
+            ignore_cleanup_errors=True,
+        ) as isolation_root:
+            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+                futures: List[Future] = []
+                for file_index, file in enumerate(files):
+                    file_home = Path(isolation_root) / str(file_index)
+                    file_home.mkdir()
+                    t0 = time.monotonic()
+                    fut = pool.submit(
+                        _run_one_file,
+                        file,
+                        pytest_passthrough,
+                        repo_root,
+                        args.file_timeout,
+                        file_home,
+                        shutdown_requested,
+                        active_processes,
+                        active_processes_lock,
+                        args.file_retries,
+                    )
+                    fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
+                    futures.append(fut)
+                # Block until everything's done. ThreadPoolExecutor.__exit__ waits
+                # for all submitted work, but doing it explicitly here makes the
+                # control flow obvious.
+                for fut in futures:
+                    fut.result() if fut.exception() is None else None
+        if shutdown_controller.received_signal is not None:
+            print(
+                f"Interrupted by signal {shutdown_controller.received_signal}; "
+                "active test trees cleaned up"
             )
-            fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
-            futures.append(fut)
-        # Block until everything's done. ThreadPoolExecutor.__exit__ waits
-        # for all submitted work, but doing it explicitly here makes the
-        # control flow obvious.
-        for fut in futures:
-            fut.result() if fut.exception() is None else None
+            return 128 + shutdown_controller.received_signal
+    finally:
+        for sig, previous_handler in previous_handlers.items():
+            signal.signal(sig, previous_handler)
 
     elapsed = time.monotonic() - started
     print()

@@ -10,9 +10,6 @@ Fix: whitelist input-permitted fields per block type at three points —
 normalize_response capture, _sanitize_replay_block (ordered-blocks replay), and
 _convert_content_part_to_anthropic (content-list replay).
 """
-import sys, os
-sys.path.insert(0, os.path.expanduser("~/.hermes/hermes-agent"))
-
 import pytest
 from agent.anthropic_adapter import (
     _sanitize_replay_block,
@@ -44,6 +41,7 @@ class TestSanitizeReplayBlock:
         poisoned = {"type": "tool_use", "id": "toolu_1", "name": "read_file",
                     "input": {"path": "a"}, "caller": {"type": "agent"}}
         out = _sanitize_replay_block(poisoned)
+        assert out is not None
         _assert_clean(out)
         assert out["name"] == "read_file" and out["input"] == {"path": "a"}
 
@@ -55,6 +53,7 @@ class TestSanitizeReplayBlock:
     def test_text_keeps_real_citations(self):
         real = [{"type": "char_location", "cited_text": "q"}]
         out = _sanitize_replay_block({"type": "text", "text": "t", "citations": real})
+        assert out is not None
         assert out["citations"] == real
 
     def test_unknown_type_dropped(self):
