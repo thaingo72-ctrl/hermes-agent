@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import textwrap
@@ -279,8 +281,8 @@ def test_positional_path_not_treated_as_flag(tmp_path: Path) -> None:
     assert "test_flagprobe.py" in proc.stdout, proc.stdout
 
 
-def test_runner_isolates_hermes_home_before_test_collection(tmp_path: Path) -> None:
-    """Import-time cron writes must not fall back to the developer's home.
+def test_runner_overrides_caller_hermes_home_before_collection(tmp_path: Path) -> None:
+    """Import-time cron writes must not use a caller-supplied Hermes home.
 
     Pytest's autouse fixture redirects HERMES_HOME only after collection.
     Modules such as ``cron.jobs`` freeze their default paths at import time,
@@ -289,18 +291,21 @@ def test_runner_isolates_hermes_home_before_test_collection(tmp_path: Path) -> N
     """
     repo_root = Path(__file__).resolve().parent.parent
     runner = repo_root / "scripts" / "run_tests_parallel.py"
-    fake_user_home = tmp_path / "developer-home"
-    fallback_jobs = fake_user_home / ".hermes" / "cron" / "jobs.json"
+    caller_home = tmp_path / "caller-home"
+    caller_jobs = caller_home / "cron" / "jobs.json"
+    resolved_home_marker = tmp_path / "resolved-home.txt"
     probe_dir = tmp_path / "cron-import-probe"
     probe_dir.mkdir()
     (probe_dir / "test_cron_import_write.py").write_text(
         textwrap.dedent(
             f"""
+            import os
             from pathlib import Path
 
             from cron.jobs import JOBS_FILE, create_job
 
-            FALLBACK_JOBS = Path({str(fallback_jobs)!r})
+            CALLER_JOBS = Path({str(caller_jobs)!r})
+            Path({str(resolved_home_marker)!r}).write_text(os.environ["HERMES_HOME"])
             create_job(
                 prompt="runner isolation probe",
                 schedule="every 1h",
@@ -309,14 +314,15 @@ def test_runner_isolates_hermes_home_before_test_collection(tmp_path: Path) -> N
 
 
             def test_import_time_cron_write_uses_runner_home():
-                assert JOBS_FILE.resolve() != FALLBACK_JOBS.resolve()
+                assert JOBS_FILE.resolve() != CALLER_JOBS.resolve()
             """
         )
     )
 
     env = os.environ.copy()
-    env.pop("HERMES_HOME", None)
-    env["HOME"] = str(fake_user_home)
+    env["HERMES_HOME"] = str(caller_home)
+    env["HOME"] = str(tmp_path / "fake-user-home")
+    env["LOCALAPPDATA"] = str(tmp_path / "fake-local-app-data")
     proc = subprocess.run(
         [
             sys.executable,
@@ -338,10 +344,232 @@ def test_runner_isolates_hermes_home_before_test_collection(tmp_path: Path) -> N
     )
 
     assert proc.returncode == 0, proc.stdout
-    assert not fallback_jobs.exists(), (
-        "collection-time cron write escaped to the developer-home fallback: "
-        f"{fallback_jobs}"
+    assert not caller_jobs.exists(), f"collection-time cron write escaped to {caller_jobs}"
+    resolved_home = Path(resolved_home_marker.read_text())
+    assert resolved_home.resolve() != caller_home.resolve()
+    assert not resolved_home.exists(), f"isolated HERMES_HOME was not removed: {resolved_home}"
+
+
+def test_parallel_files_get_distinct_collection_homes(tmp_path: Path) -> None:
+    """Parallel collection-time cron writes must not share storage."""
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    probe_dir = tmp_path / "parallel-cron-probes"
+    probe_dir.mkdir()
+    markers = [tmp_path / "home-a.txt", tmp_path / "home-b.txt"]
+    for index, marker in enumerate(markers):
+        (probe_dir / f"test_probe_{index}.py").write_text(
+            textwrap.dedent(
+                f"""
+                import os
+                from pathlib import Path
+                from cron.jobs import create_job
+
+                Path({str(marker)!r}).write_text(os.environ["HERMES_HOME"])
+                create_job(
+                    prompt="parallel runner isolation probe {index}",
+                    schedule="every 1h",
+                    name="parallel runner isolation probe {index}",
+                )
+
+
+                def test_probe():
+                    assert os.environ["HERMES_HOME"]
+                """
+            )
+        )
+
+    caller_home = tmp_path / "caller-home"
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(caller_home)
+    env["HOME"] = str(tmp_path / "fake-user-home")
+    env["LOCALAPPDATA"] = str(tmp_path / "fake-local-app-data")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--paths",
+            str(probe_dir),
+            "-j",
+            "2",
+            "--file-timeout",
+            "30",
+            "-q",
+        ],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
     )
+
+    assert proc.returncode == 0, proc.stdout
+    homes = [Path(marker.read_text()) for marker in markers]
+    assert homes[0].resolve() != homes[1].resolve()
+    assert all(not home.exists() for home in homes)
+    assert not (caller_home / "cron" / "jobs.json").exists()
+
+
+def test_timeout_cleans_collection_home(tmp_path: Path) -> None:
+    """The timeout path must kill pytest and remove its isolated cron store."""
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    probe_dir = tmp_path / "timeout-cron-probe"
+    probe_dir.mkdir()
+    home_marker = tmp_path / "timeout-home.txt"
+    (probe_dir / "test_timeout.py").write_text(
+        textwrap.dedent(
+            f"""
+            import os
+            from pathlib import Path
+            import time
+            from cron.jobs import create_job
+
+            Path({str(home_marker)!r}).write_text(os.environ["HERMES_HOME"])
+            create_job(
+                prompt="timeout runner isolation probe",
+                schedule="every 1h",
+                name="timeout runner isolation probe",
+            )
+
+
+            def test_timeout():
+                time.sleep(300)
+            """
+        )
+    )
+
+    caller_home = tmp_path / "caller-home"
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(caller_home)
+    env["HOME"] = str(tmp_path / "fake-user-home")
+    env["LOCALAPPDATA"] = str(tmp_path / "fake-local-app-data")
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--paths",
+            str(probe_dir),
+            "-j",
+            "1",
+            "--file-timeout",
+            "1",
+            "-q",
+        ],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=30,
+    )
+
+    assert proc.returncode == 1, proc.stdout
+    assert "1s exceeded" in proc.stdout
+    isolated_home = Path(home_marker.read_text())
+    assert not isolated_home.exists()
+    assert not (caller_home / "cron" / "jobs.json").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal/process-group probe")
+@pytest.mark.live_system_guard_bypass
+def test_sigterm_cleans_active_process_tree_and_isolated_home(tmp_path: Path) -> None:
+    """Stopping the runner must not orphan pytest or its temporary home."""
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    probe_dir = tmp_path / "sigterm-probe"
+    probe_dir.mkdir()
+    home_marker = tmp_path / "isolated-home.txt"
+    pytest_pid_marker = tmp_path / "pytest-pid.txt"
+    grandchild_pid_marker = tmp_path / "grandchild-pid.txt"
+    (probe_dir / "test_hang.py").write_text(
+        textwrap.dedent(
+            f"""
+            import os
+            from pathlib import Path
+            import subprocess
+            import sys
+            import time
+
+            Path({str(home_marker)!r}).write_text(os.environ["HERMES_HOME"])
+            Path({str(pytest_pid_marker)!r}).write_text(str(os.getpid()))
+
+
+            def test_hang_with_grandchild():
+                child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
+                Path({str(grandchild_pid_marker)!r}).write_text(str(child.pid))
+                time.sleep(300)
+            """
+        )
+    )
+
+    caller_home = tmp_path / "caller-home"
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(caller_home)
+    env["HOME"] = str(tmp_path / "fake-user-home")
+    env["LOCALAPPDATA"] = str(tmp_path / "fake-local-app-data")
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            str(runner),
+            "--paths",
+            str(probe_dir),
+            "-j",
+            "1",
+            "--file-timeout",
+            "300",
+            "-q",
+        ],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    pytest_pid = None
+    grandchild_pid = None
+    isolated_home = None
+    try:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if home_marker.exists() and pytest_pid_marker.exists() and grandchild_pid_marker.exists():
+                break
+            if proc.poll() is not None:
+                output = proc.stdout.read() if proc.stdout is not None else ""
+                pytest.fail(f"runner exited before probe was ready: {output}")
+            time.sleep(0.05)
+        else:
+            pytest.fail("timed out waiting for SIGTERM probe handoff")
+
+        isolated_home = Path(home_marker.read_text())
+        pytest_pid = int(pytest_pid_marker.read_text())
+        grandchild_pid = int(grandchild_pid_marker.read_text())
+        proc.terminate()
+        proc.communicate(timeout=15)
+        runner_returncode = proc.returncode
+        time.sleep(0.2)
+
+        pytest_alive = _pid_alive(pytest_pid)
+        grandchild_alive = _pid_alive(grandchild_pid)
+        isolated_home_exists = isolated_home.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=10)
+        if pytest_pid is not None:
+            try:
+                os.killpg(pytest_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if isolated_home is not None:
+            shutil.rmtree(isolated_home, ignore_errors=True)
+
+    assert runner_returncode == 128 + signal.SIGTERM
+    assert not pytest_alive, "pytest child survived runner SIGTERM"
+    assert not grandchild_alive, "pytest grandchild survived runner SIGTERM"
+    assert not isolated_home_exists, "per-file HERMES_HOME survived runner SIGTERM"
 
 
 def test_file_retry_self_heals_and_prints_both_attempts(tmp_path: Path) -> None:

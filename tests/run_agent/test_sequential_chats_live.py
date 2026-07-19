@@ -40,10 +40,9 @@ def _load_user_env() -> None:
         os.environ.setdefault(k, v)
 
 
-_load_user_env()
-
-
 LIVE = os.environ.get("HERMES_LIVE_TESTS") == "1"
+if LIVE:
+    _load_user_env()
 OR_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 pytestmark = [

@@ -33,6 +33,7 @@ Usage:
 Environment:
     HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
     HERMES_TEST_PATHS    Override discovery roots (colon-sep, default: 'tests')
+    HERMES_HOME          Always replaced with a unique temporary home per file
 
 Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 """
@@ -42,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -49,7 +51,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 # Default test discovery roots.
@@ -235,6 +237,9 @@ def _run_one_file(
     repo_root: Path,
     file_timeout: float,
     isolated_hermes_home: Path,
+    shutdown_requested: threading.Event,
+    active_processes: dict[int, tuple[subprocess.Popen, int | None]],
+    active_processes_lock: threading.Lock,
     retries: int = 0,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Run ``python -m pytest <file> <pytest_args>`` in a fresh subprocess.
@@ -270,14 +275,28 @@ def _run_one_file(
     bound a pathologically slow or hung file as a whole.
     """
     file, rc, output, summary, subproc_wall = _run_one_file_once(
-        file, pytest_args, repo_root, file_timeout, isolated_hermes_home
+        file,
+        pytest_args,
+        repo_root,
+        file_timeout,
+        isolated_hermes_home,
+        shutdown_requested,
+        active_processes,
+        active_processes_lock,
     )
     attempt = 0
-    while rc != 0 and attempt < retries:
+    while rc != 0 and attempt < retries and not shutdown_requested.is_set():
         attempt += 1
         first_output = output
         file, rc, output, summary, subproc_wall2 = _run_one_file_once(
-            file, pytest_args, repo_root, file_timeout, isolated_hermes_home
+            file,
+            pytest_args,
+            repo_root,
+            file_timeout,
+            isolated_hermes_home,
+            shutdown_requested,
+            active_processes,
+            active_processes_lock,
         )
         subproc_wall += subproc_wall2
         if rc == 0:
@@ -306,8 +325,14 @@ def _run_one_file_once(
     repo_root: Path,
     file_timeout: float,
     isolated_hermes_home: Path,
+    shutdown_requested: threading.Event,
+    active_processes: dict[int, tuple[subprocess.Popen, int | None]],
+    active_processes_lock: threading.Lock,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
+    if shutdown_requested.is_set():
+        return file, 130, "runner interrupted before file started\n", {}, 0.0
+
     cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
 
     # Pytest fixtures run after collection. Modules such as cron.jobs resolve
@@ -327,8 +352,9 @@ def _run_one_file_once(
         env=child_env,
         # POSIX: place the child at the head of its own process group so
         # _kill_tree can SIGKILL the group atomically.
-        # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
-        # _kill_tree handles the Windows path via taskkill /F /T.
+        # Windows: start_new_session is ignored by CPython; _kill_tree uses
+        # taskkill /F /T while the pytest leader is still alive. Descendant
+        # cleanup after an already-exited leader remains best-effort there.
         start_new_session=True,
     )
 
@@ -342,6 +368,12 @@ def _run_one_file_once(
             pgid = os.getpgid(proc.pid)
         except (ProcessLookupError, PermissionError):
             pgid = None
+
+    with active_processes_lock:
+        active_processes[proc.pid] = (proc, pgid)
+        stop_after_register = shutdown_requested.is_set()
+    if stop_after_register:
+        _kill_tree(proc, pgid=pgid)
 
     try:
         output, _ = proc.communicate(timeout=file_timeout)
@@ -368,6 +400,9 @@ def _run_one_file_once(
         _kill_tree(proc, pgid=pgid)
 
         output += "\n"
+    finally:
+        with active_processes_lock:
+            active_processes.pop(proc.pid, None)
 
     if rc == 5:
         # No tests collected in THIS file — legitimate per-file: a
@@ -1003,32 +1038,65 @@ def main() -> int:
     # One unique HERMES_HOME per file protects collection-time imports and
     # prevents parallel files from sharing pre-fixture state. The run root is
     # removed only after every child process tree has exited.
-    with tempfile.TemporaryDirectory(
-        prefix="hermes-test-run-",
-        ignore_cleanup_errors=True,
-    ) as isolation_root:
-        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-            futures: List[Future] = []
-            for file_index, file in enumerate(files):
-                file_home = Path(isolation_root) / str(file_index)
-                file_home.mkdir()
-                t0 = time.monotonic()
-                fut = pool.submit(
-                    _run_one_file,
-                    file,
-                    pytest_passthrough,
-                    repo_root,
-                    args.file_timeout,
-                    file_home,
-                    args.file_retries,
-                )
-                fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
-                futures.append(fut)
-            # Block until everything's done. ThreadPoolExecutor.__exit__ waits
-            # for all submitted work, but doing it explicitly here makes the
-            # control flow obvious.
-            for fut in futures:
-                fut.result() if fut.exception() is None else None
+    shutdown_requested = threading.Event()
+    active_processes: dict[int, tuple[subprocess.Popen, int | None]] = {}
+    active_processes_lock = threading.Lock()
+    received_signal: int | None = None
+
+    def _handle_signal(signum: int, _frame: object) -> None:
+        nonlocal received_signal
+        if received_signal is None:
+            received_signal = signum
+        shutdown_requested.set()
+        with active_processes_lock:
+            processes = list(active_processes.values())
+        for proc, pgid in processes:
+            _kill_tree(proc, pgid=pgid)
+
+    previous_handlers: dict[int, Any] = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, _handle_signal)
+        except (OSError, ValueError):
+            pass
+
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix="hermes-test-run-",
+            ignore_cleanup_errors=True,
+        ) as isolation_root:
+            with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+                futures: List[Future] = []
+                for file_index, file in enumerate(files):
+                    file_home = Path(isolation_root) / str(file_index)
+                    file_home.mkdir()
+                    t0 = time.monotonic()
+                    fut = pool.submit(
+                        _run_one_file,
+                        file,
+                        pytest_passthrough,
+                        repo_root,
+                        args.file_timeout,
+                        file_home,
+                        shutdown_requested,
+                        active_processes,
+                        active_processes_lock,
+                        args.file_retries,
+                    )
+                    fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
+                    futures.append(fut)
+                # Block until everything's done. ThreadPoolExecutor.__exit__ waits
+                # for all submitted work, but doing it explicitly here makes the
+                # control flow obvious.
+                for fut in futures:
+                    fut.result() if fut.exception() is None else None
+        if received_signal is not None:
+            print(f"Interrupted by signal {received_signal}; active test trees cleaned up")
+            return 128 + received_signal
+    finally:
+        for sig, previous_handler in previous_handlers.items():
+            signal.signal(sig, previous_handler)
 
     elapsed = time.monotonic() - started
     print()
