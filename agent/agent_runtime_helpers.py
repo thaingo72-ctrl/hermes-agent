@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_cli.timeouts import get_provider_request_timeout
+from agent.message_content import flatten_message_text
 from agent.prompt_builder import format_steer_marker
 from agent.tool_dispatch_helpers import _trajectory_normalize_msg, make_tool_result_message
 from agent.trajectory import convert_scratchpad_to_think
@@ -721,7 +722,7 @@ def repair_message_sequence_with_cursor(agent, messages: List[Dict]) -> int:
 
 
 
-def strip_think_blocks(agent, content: str) -> str:
+def strip_think_blocks(agent, content: Any) -> str:
     """Remove reasoning/thinking blocks from content, returning only visible text.
 
     Handles four cases:
@@ -752,41 +753,14 @@ def strip_think_blocks(agent, content: str) -> str:
     after punctuation and carries a ``name="..."`` attribute) so prose
     mentions like "Use <function> in JavaScript" are preserved.
     """
+    # Defensive coercion: callers may pass multimodal content-parts lists
+    # (e.g. after vision turns or context compaction). Use the canonical
+    # flattener so text/output_text/object parts stay visible and image/audio
+    # parts are dropped consistently across every call path.
+    if not isinstance(content, str):
+        content = flatten_message_text(content)
     if not content:
         return ""
-    # Coerce non-string content to text before any regex runs.  Providers
-    # that return assistant ``content`` as a list of blocks (Anthropic via
-    # OpenRouter emits ``[{"type":"text",...}, {"type":"thinking",...}]``) or
-    # as a dict flow into this shared helper from several callers — most
-    # notably ``_interim_assistant_visible_text`` reading a *stored* history
-    # message whose content was persisted as a list.  A raw list/dict reaching
-    # ``re.sub`` below raises ``TypeError: expected string or bytes-like
-    # object, got 'list'``, which the outer conversation loop swallows and
-    # retries forever (observed as an infinite "preparing terminal…" loop on
-    # Anthropic models via OpenRouter).  Flatten here so every caller is safe.
-    if not isinstance(content, str):
-        if isinstance(content, list):
-            _parts: list[str] = []
-            for _part in content:
-                if isinstance(_part, str):
-                    _parts.append(_part)
-                elif isinstance(_part, dict):
-                    _ptype = str(_part.get("type") or "").strip().lower()
-                    # Drop reasoning/thinking blocks outright — this function's
-                    # whole job is to strip them, and their text lives under
-                    # different keys ("thinking", "reasoning") per provider.
-                    if _ptype in {"thinking", "reasoning", "redacted_thinking"}:
-                        continue
-                    _text = _part.get("text")
-                    if isinstance(_text, str) and _text:
-                        _parts.append(_text)
-            content = "".join(_parts)
-        elif isinstance(content, dict):
-            content = str(content.get("text") or content.get("content") or "")
-        else:
-            content = str(content)
-        if not content:
-            return ""
     # 1. Closed tag pairs — case-insensitive for all variants so
     #    mixed-case tags (<THINK>, <Thinking>) don't slip through to
     #    the unterminated-tag pass and take trailing content with them.

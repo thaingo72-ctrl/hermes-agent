@@ -2495,6 +2495,19 @@ def test_interim_visible_text_flattens_structured_content(monkeypatch):
     assert visible == "first visible line\nsecond visible line"
 
 
+def test_strip_think_blocks_preserves_all_structured_text_parts(monkeypatch):
+    """The defensive helper must share the canonical content flattener."""
+    agent = _build_agent(monkeypatch)
+
+    visible = agent._strip_think_blocks([
+        {"type": "text", "text": "first visible line"},
+        SimpleNamespace(type="output_text", text="second visible line"),
+        {"type": "image_url", "image_url": {"url": "https://example.invalid/chart.png"}},
+    ])
+
+    assert visible == "first visible line\nsecond visible line"
+
+
 def test_local_postprocessing_error_stops_and_marks_turn_failed(monkeypatch):
     """A deterministic local bug must not consume the whole iteration budget."""
     agent = _build_agent(monkeypatch)
@@ -2518,6 +2531,27 @@ def test_local_postprocessing_error_stops_and_marks_turn_failed(monkeypatch):
     assert result["completed"] is False
     assert result["failed"] is True
     assert result["turn_exit_reason"].startswith("local_processing_error(")
+
+
+def test_api_phase_error_remains_on_retry_path(monkeypatch):
+    """API failures stay in the dedicated retry path, outside local processing."""
+    agent = _build_agent(monkeypatch)
+    attempts = 0
+
+    def _raise_api_error(_api_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("transient transport wrapper failure")
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _raise_api_error)
+
+    result = agent.run_conversation("retry the model call")
+
+    assert attempts == 3
+    assert result["api_calls"] == 1
+    assert result["completed"] is False
+    assert result["failed"] is True
+    assert "local message processing" not in result["final_response"]
 
 
 def test_interim_commentary_precedes_content_from_real_codex_normalization(monkeypatch):

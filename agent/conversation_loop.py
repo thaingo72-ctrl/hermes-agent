@@ -24,7 +24,6 @@ import re
 import ssl
 import threading
 import time
-import traceback
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -50,6 +49,8 @@ from agent.turn_context import (
 )
 from agent.turn_retry_state import TurnRetryState
 from agent.runtime_cwd import resolve_agent_cwd
+from agent.memory_manager import build_memory_context_block
+from agent.message_content import flatten_message_text
 from agent.message_sanitization import (
     close_interrupted_tool_sequence,
     _repair_tool_call_arguments,
@@ -93,26 +94,6 @@ logger = logging.getLogger(__name__)
 # cancelled while waiting on the provider. Surfaces (ACP, TUI) match on this
 # to treat it as cancellation metadata rather than assistant prose.
 INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model response ("
-
-# Modules that indicate a deterministic local processing error when they
-# appear in an exception traceback WITHOUT any API-call module. Used by the
-# outer-loop error classifier to avoid retrying bugs that will fail
-# identically every time (e.g. TypeError from passing list content into a
-# regex helper).  IMPORTANT: do NOT include "conversation_loop" or
-# "run_agent" here — those are the container modules for the try/except
-# itself, so every exception passes through them, which would make
-# _hit_local always True and misclassify transient API/network errors as
-# non-retryable local bugs. (#66267)
-_LOCAL_PROCESSING_MODULES = frozenset({
-    "agent_runtime_helpers",
-    "message_content",
-    "message_sanitization",
-    "chat_completion_helpers",  # only local when NOT also an API-call module
-})
-_API_CALL_MODULES = frozenset({
-    "chat_completion_helpers",
-})
-
 
 def _apply_active_turn_redirect(agent: Any, messages: List[Dict[str, Any]], text: str) -> None:
     """Append a provider-safe checkpoint and correction to the live turn.
@@ -5173,23 +5154,10 @@ def run_conversation(
             # Normalize content to string — some OpenAI-compatible servers
             # (llama-server, etc.) return content as a dict or list instead
             # of a plain string, which crashes downstream .strip() calls.
+            # Keep this on the canonical flattener so Responses output_text
+            # and object parts survive while non-text media is dropped.
             if assistant_message.content is not None and not isinstance(assistant_message.content, str):
-                raw = assistant_message.content
-                if isinstance(raw, dict):
-                    assistant_message.content = raw.get("text", "") or raw.get("content", "") or json.dumps(raw)
-                elif isinstance(raw, list):
-                    # Multimodal content list — extract text parts
-                    parts = []
-                    for part in raw:
-                        if isinstance(part, str):
-                            parts.append(part)
-                        elif isinstance(part, dict) and part.get("type") == "text":
-                            parts.append(part.get("text", ""))
-                        elif isinstance(part, dict) and "text" in part:
-                            parts.append(str(part["text"]))
-                    assistant_message.content = "\n".join(parts)
-                else:
-                    assistant_message.content = str(raw)
+                assistant_message.content = flatten_message_text(assistant_message.content)
 
             try:
                 from hermes_cli.plugins import (
@@ -6578,28 +6546,13 @@ def run_conversation(
                 break
             
         except Exception as e:
-            # Phase-aware error classification. The huge outer try/except spans
-            # both the actual API request and all local post-processing of the
-            # returned assistant message. Deterministic local bugs (e.g.
-            # passing a multimodal content list into a regex helper after a
-            # vision turn or context compaction) should not be retried: they
-            # will fail identically on every iteration and only burn the
-            # iteration budget. We classify an error as local by inspecting the
-            # traceback: if the exception propagated through any of the known
-            # local post-processing helpers and never entered the interruptible
-            # API-call helpers, it is almost certainly a local processing bug.
-            # (#66267)
-            tb_module_names: set[str] = set()
-            _tb = e.__traceback__
-            while _tb is not None:
-                _fname = os.path.splitext(os.path.basename(_tb.tb_frame.f_code.co_filename))[0]
-                tb_module_names.add(_fname)
-                _tb = _tb.tb_next
-
-            _hit_local = bool(tb_module_names & _LOCAL_PROCESSING_MODULES)
-            _hit_api = bool(tb_module_names & _API_CALL_MODULES)
-
-            _is_local_processing_error = _hit_local and not _hit_api
+            # This try block starts only after the API retry/failover path has
+            # returned a non-None response (see the guard immediately above
+            # it). Therefore every exception caught here is local response/tool
+            # post-processing. Do not infer phase from traceback filenames:
+            # conversation_loop.py necessarily appears in every traceback and
+            # made that classifier both redundant and brittle. (#66267)
+            _is_local_processing_error = True
 
             if _is_local_processing_error:
                 error_msg = (
@@ -6619,7 +6572,7 @@ def run_conversation(
             # — users would see a one-line summary on screen with no way to
             # recover the call site.  logger.exception() includes the
             # traceback automatically and emits at ERROR.
-            logger.exception("Outer loop error in API call #%d", api_call_count)
+            logger.exception("Local processing error after API call #%d", api_call_count)
             
             # If an assistant message with tool_calls was already appended,
             # the API expects a role="tool" result for every tool_call_id.
