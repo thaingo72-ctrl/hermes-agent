@@ -44,6 +44,9 @@ def flatten_message_text(content: Any, *, sep: str = "\n") -> str:
     text = _text_from_part(content)
     if text:
         return text
+    part_type = str(_field(content, "type") or "").strip().lower()
+    if part_type in _NON_TEXT_PART_TYPES:
+        return ""
     try:
         return str(content)
     except Exception:

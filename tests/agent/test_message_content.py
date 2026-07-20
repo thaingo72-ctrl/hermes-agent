@@ -23,3 +23,11 @@ def test_flatten_message_text_accepts_object_parts():
     ]
 
     assert flatten_message_text(content) == "object text\nlegacy content"
+
+
+def test_flatten_message_text_drops_standalone_media_parts():
+    assert flatten_message_text({
+        "type": "image_url",
+        "image_url": {"url": "https://example.invalid/chart.png"},
+    }) == ""
+    assert flatten_message_text(SimpleNamespace(type="input_audio", input_audio="bytes")) == ""
