@@ -6661,6 +6661,12 @@ def run_conversation(
                 _is_local_processing_error
                 or api_call_count >= agent.max_iterations - 1
             ):
+                # Any outer-loop error that forces termination is a failed
+                # turn, even when it produced a human-readable diagnostic.
+                # Without this flag, turn finalization sees a non-empty
+                # response before max_iterations and incorrectly reports
+                # completed=True, causing cron to mark the run successful.
+                failed = True
                 if _is_local_processing_error:
                     _turn_exit_reason = f"local_processing_error({error_msg[:80]})"
                     final_response = f"I apologize, but I encountered an error while processing the model response: {error_msg}"

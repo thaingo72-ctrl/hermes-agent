@@ -2479,6 +2479,47 @@ def test_interim_commentary_preserves_assistant_content(monkeypatch):
     assert "I'll inspect the repo structure first." in observed["text"]
 
 
+def test_interim_visible_text_flattens_structured_content(monkeypatch):
+    """Vision/compaction content lists must not be passed directly to regexes."""
+    agent = _build_agent(monkeypatch)
+
+    visible = agent._interim_assistant_visible_text({
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "first visible line"},
+            {"type": "image_url", "image_url": {"url": "https://example.invalid/chart.png"}},
+            {"type": "output_text", "text": "second visible line"},
+        ],
+    })
+
+    assert visible == "first visible line\nsecond visible line"
+
+
+def test_local_postprocessing_error_stops_and_marks_turn_failed(monkeypatch):
+    """A deterministic local bug must not consume the whole iteration budget."""
+    agent = _build_agent(monkeypatch)
+    api_calls = 0
+
+    def _response(_api_kwargs):
+        nonlocal api_calls
+        api_calls += 1
+        return _codex_tool_call_response()
+
+    def _raise_local_error(_message):
+        raise TypeError("deterministic local processing bug")
+
+    monkeypatch.setattr(agent, "_interruptible_api_call", _response)
+    monkeypatch.setattr(agent, "_interim_assistant_visible_text", _raise_local_error)
+
+    result = agent.run_conversation("run the tool")
+
+    assert api_calls == 1
+    assert result["api_calls"] == 1
+    assert result["completed"] is False
+    assert result["failed"] is True
+    assert result["turn_exit_reason"].startswith("local_processing_error(")
+
+
 def test_interim_commentary_precedes_content_from_real_codex_normalization(monkeypatch):
     """Structured commentary wins over final-answer content on tool turns."""
     agent = _build_agent(monkeypatch)
