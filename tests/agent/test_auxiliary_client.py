@@ -3,6 +3,7 @@
 import base64
 import json
 import logging
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -5254,11 +5255,20 @@ class TestCodexAuxiliaryAdapterTimeout:
         assert response.choices[0].message.content == "summary"
 
     def test_enforces_total_timeout_while_stream_keeps_emitting_events(self):
+        cleanup_started = threading.Event()
+        cleanup_finished = threading.Event()
+        release_cleanup = threading.Event()
+        close_calls = []
+
         class _SlowAliveCreateStream:
             def __iter__(self):
-                for _ in range(5):
-                    time.sleep(0.03)
-                    yield SimpleNamespace(type="response.in_progress")
+                # Emit one healthy event, then wait until the timeout cleanup
+                # worker starts before emitting another. The second event must
+                # observe the elapsed deadline and raise without waiting for the
+                # deliberately blocked client close below.
+                yield SimpleNamespace(type="response.in_progress")
+                assert cleanup_started.wait(timeout=1.0)
+                yield SimpleNamespace(type="response.in_progress")
 
             def close(self): pass
 
@@ -5266,17 +5276,34 @@ class TestCodexAuxiliaryAdapterTimeout:
             def create(self, **kwargs):
                 return _SlowAliveCreateStream()
 
-        fake_client = SimpleNamespace(responses=FakeResponses(), close=lambda: None)
+        def slow_client_close():
+            close_calls.append(1)
+            cleanup_started.set()
+            try:
+                release_cleanup.wait(timeout=1.0)
+            finally:
+                cleanup_finished.set()
+
+        fake_client = SimpleNamespace(
+            responses=FakeResponses(),
+            close=slow_client_close,
+        )
         adapter = _CodexCompletionsAdapter(fake_client, "gpt-5.5")
 
         started = time.monotonic()
-        with pytest.raises(TimeoutError):
-            adapter.create(
-                messages=[{"role": "user", "content": "summarize this"}],
-                timeout=0.05,
-            )
-
-        assert time.monotonic() - started < 0.14
+        try:
+            with pytest.raises(TimeoutError):
+                adapter.create(
+                    messages=[{"role": "user", "content": "summarize this"}],
+                    timeout=0.01,
+                )
+            elapsed = time.monotonic() - started
+            assert elapsed < 0.5
+            assert cleanup_started.is_set()
+        finally:
+            release_cleanup.set()
+        assert cleanup_finished.wait(timeout=1.0)
+        assert close_calls == [1]
 
 
 class TestCodexAuxiliaryToolMessageConversion:

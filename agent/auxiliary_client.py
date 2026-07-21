@@ -956,8 +956,32 @@ class _CodexCompletionsAdapter:
     def __init__(self, real_client: OpenAI, model: str):
         self._client = real_client
         self._model = model
+        # Resolve heavier Codex helpers when the adapter is constructed, before
+        # any per-call timeout starts. Keeping these imports out of create()
+        # prevents cold-import latency from consuming a short request budget.
+        from agent.codex_responses_adapter import _chat_messages_to_responses_input
+        from agent.codex_runtime import _consume_codex_event_stream
+        from agent.transports.codex import (
+            _content_cache_key,
+            _default_prompt_cache_retention_for_request,
+        )
+        from tools import interrupt as interrupt_module
+        from utils import base_url_host_matches
+        self._chat_messages_to_responses_input = _chat_messages_to_responses_input
+        self._consume_codex_event_stream = _consume_codex_event_stream
+        self._content_cache_key = _content_cache_key
+        self._default_prompt_cache_retention_for_request = (
+            _default_prompt_cache_retention_for_request
+        )
+        self._interrupt_module = interrupt_module
+        self._base_url_host_matches = base_url_host_matches
 
     def create(self, **kwargs) -> Any:
+        # The caller's timeout covers the whole adapter call, including lazy
+        # imports and request construction — not only the wire stream.  This
+        # matters on cold start, where importing the Codex runtime can consume
+        # a meaningful share of a short auxiliary timeout.
+        call_started_at = time.monotonic()
         messages = kwargs.get("messages", [])
         model = kwargs.get("model", self._model)
 
@@ -974,9 +998,6 @@ class _CodexCompletionsAdapter:
         # assistant tool calls as `function_call` items and tool results as
         # `function_call_output` items with a valid call_id, so every
         # Responses path normalizes tool history identically and cannot drift.
-        from agent.codex_responses_adapter import _chat_messages_to_responses_input
-        from utils import base_url_host_matches
-
         instructions = "You are a helpful assistant."
         replay_messages: List[Dict[str, Any]] = []
         for msg in messages:
@@ -995,8 +1016,8 @@ class _CodexCompletionsAdapter:
         # through this adapter instead of agent/transports/codex.py's
         # build_kwargs, so they need the same guard applied independently.
         _host_for_input = str(getattr(self._client, "base_url", "") or "")
-        _is_github_for_input = base_url_host_matches(_host_for_input, "githubcopilot.com")
-        input_items = _chat_messages_to_responses_input(
+        _is_github_for_input = self._base_url_host_matches(_host_for_input, "githubcopilot.com")
+        input_items = self._chat_messages_to_responses_input(
             replay_messages, is_github_responses=_is_github_for_input,
         )
 
@@ -1102,24 +1123,20 @@ class _CodexCompletionsAdapter:
         # key in extra_body (not top-level) and GitHub/Copilot Responses opts
         # out of cache-key routing entirely — for those hosts, skip it here.
         try:
-            from agent.transports.codex import (
-                _content_cache_key,
-                _default_prompt_cache_retention_for_request,
-            )
-            from utils import base_url_host_matches
-
             _host_src = str(getattr(self._client, "base_url", "") or "")
-            _is_xai = base_url_host_matches(_host_src, "x.ai") or base_url_host_matches(_host_src, "api.x.ai")
+            _is_xai = self._base_url_host_matches(
+                _host_src, "x.ai"
+            ) or self._base_url_host_matches(_host_src, "api.x.ai")
             _is_github = (
-                base_url_host_matches(_host_src, "githubcopilot.com")
-                or base_url_host_matches(_host_src, "models.github.ai")
+                self._base_url_host_matches(_host_src, "githubcopilot.com")
+                or self._base_url_host_matches(_host_src, "models.github.ai")
             )
             if not _is_xai and not _is_github and "prompt_cache_key" not in resp_kwargs:
-                _cache_key = _content_cache_key(instructions, resp_kwargs.get("tools"))
+                _cache_key = self._content_cache_key(instructions, resp_kwargs.get("tools"))
                 if _cache_key:
                     resp_kwargs["prompt_cache_key"] = _cache_key
             if "prompt_cache_retention" not in resp_kwargs:
-                _cache_retention = _default_prompt_cache_retention_for_request(
+                _cache_retention = self._default_prompt_cache_retention_for_request(
                     model,
                     _host_src,
                 )
@@ -1135,14 +1152,20 @@ class _CodexCompletionsAdapter:
         tool_calls_raw: List[Any] = []
         usage = None
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
-        deadline = time.monotonic() + float(total_timeout) if total_timeout else None
+        deadline = call_started_at + float(total_timeout) if total_timeout else None
         timed_out = threading.Event()
+        timeout_cleanup_started = threading.Event()
+        timeout_cleanup_lock = threading.Lock()
         timeout_timer: Optional[threading.Timer] = None
 
         def _timeout_message() -> str:
             return f"Codex auxiliary Responses stream exceeded {float(total_timeout):.1f}s total timeout"
 
         def _close_client_on_timeout() -> None:
+            with timeout_cleanup_lock:
+                if timeout_cleanup_started.is_set():
+                    return
+                timeout_cleanup_started.set()
             timed_out.set()
             close = getattr(self._client, "close", None)
             if callable(close):
@@ -1164,15 +1187,23 @@ class _CodexCompletionsAdapter:
         def _check_cancelled() -> None:
             if deadline is not None and time.monotonic() >= deadline:
                 if not timed_out.is_set():
-                    _close_client_on_timeout()
+                    # Timeout reporting must not wait for client close/cache
+                    # eviction. Those are best-effort cleanup and can perform
+                    # cold imports or transport teardown; run them on a daemon
+                    # worker while the caller receives TimeoutError promptly.
+                    timed_out.set()
+                    threading.Thread(
+                        target=_close_client_on_timeout,
+                        name="hermes-codex-aux-timeout-cleanup",
+                        daemon=True,
+                    ).start()
                 raise TimeoutError(_timeout_message())
             try:
-                from tools.interrupt import is_interrupted
                 # Honor interrupt protection for atomic aux tasks (compression):
                 # a mid-flight gateway interrupt must NOT abort the summary call
                 # and trigger a degraded fallback marker (#23975). Timeouts above
                 # still fire; other aux tasks remain interruptible.
-                if is_interrupted() and not _aux_interrupt_protected():
+                if self._interrupt_module.is_interrupted() and not _aux_interrupt_protected():
                     raise InterruptedError("Codex auxiliary Responses stream interrupted")
             except InterruptedError:
                 raise
@@ -1182,11 +1213,16 @@ class _CodexCompletionsAdapter:
                 pass
 
         try:
+            # Fail before opening a stream if cold-start work already consumed
+            # the caller's entire budget.  Arm the timer only for the remaining
+            # wall-clock allowance so its close path matches the same deadline.
+            _check_cancelled()
             if total_timeout:
-                timeout_timer = threading.Timer(float(total_timeout), _close_client_on_timeout)
+                assert deadline is not None
+                remaining = max(0.0, deadline - time.monotonic())
+                timeout_timer = threading.Timer(remaining, _close_client_on_timeout)
                 timeout_timer.daemon = True
                 timeout_timer.start()
-            _check_cancelled()
 
             # Event-driven Responses streaming via the low-level
             # ``responses.create(stream=True)`` path.  The high-level
@@ -1198,8 +1234,6 @@ class _CodexCompletionsAdapter:
             # Consuming raw events and assembling the final response
             # ourselves from ``response.output_item.done`` makes us
             # structurally immune to that drift.
-            from agent.codex_runtime import _consume_codex_event_stream
-
             stream_kwargs = dict(resp_kwargs)
             stream_kwargs["stream"] = True
 
@@ -1214,7 +1248,7 @@ class _CodexCompletionsAdapter:
 
             event_stream = self._client.responses.create(**stream_kwargs)
             try:
-                final = _consume_codex_event_stream(
+                final = self._consume_codex_event_stream(
                     event_stream,
                     model=resp_kwargs.get("model"),
                     on_event=_on_each_event,
