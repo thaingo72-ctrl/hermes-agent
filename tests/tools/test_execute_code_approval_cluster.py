@@ -188,6 +188,89 @@ def test_guard_cron_deny_blocks(monkeypatch):
     assert res["outcome"] == "blocked"
 
 
+def test_guard_cron_context_blocks_without_process_env(monkeypatch):
+    """Cron approval policy follows task-local context, not global env state."""
+    from gateway.session_context import (
+        clear_session_vars,
+        reset_session_vars,
+        set_session_vars,
+    )
+
+    monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+    monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    monkeypatch.setattr(A, "_YOLO_MODE_FROZEN", False)
+    monkeypatch.setattr(A, "_get_approval_mode", lambda: "manual")
+    monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "deny")
+
+    tokens = set_session_vars(cron_session=True)
+    try:
+        res = A.check_execute_code_guard("import os", "local")
+    finally:
+        clear_session_vars(tokens)
+        reset_session_vars()
+
+    assert res["approved"] is False
+    assert res["outcome"] == "blocked"
+
+
+def test_guard_gateway_context_ignores_leaked_process_cron_flag(monkeypatch):
+    """An in-process cron tick must not reclassify a later Telegram turn.
+
+    The gateway scheduler historically wrote HERMES_CRON_SESSION=1 into the
+    process environment. A later interactive worker inherited that stale flag,
+    so execute_code took the unattended cron-deny path before it could use the
+    live Telegram approval surface.
+    """
+    from gateway.session_context import (
+        clear_session_vars,
+        reset_session_vars,
+        set_session_vars,
+    )
+
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    monkeypatch.setenv("HERMES_EXEC_ASK", "1")
+    monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+    monkeypatch.setattr(A, "_YOLO_MODE_FROZEN", False)
+    monkeypatch.setattr(A, "_get_approval_mode", lambda: "smart")
+    monkeypatch.setattr(A, "_get_cron_approval_mode", lambda: "deny")
+    monkeypatch.setattr(A, "_smart_approve", lambda _command, _description: "approve")
+
+    session_key = "telegram-after-cron"
+    key_token = A.set_current_session_key(session_key)
+    context_tokens = set_session_vars(
+        platform="telegram",
+        session_key=session_key,
+    )
+    try:
+        res = A.check_execute_code_guard("print('interactive')", "local")
+    finally:
+        clear_session_vars(context_tokens)
+        reset_session_vars()
+        A.reset_current_session_key(key_token)
+
+    assert res["approved"] is True
+    assert res.get("smart_approved") is True
+
+
+def test_clear_restores_legacy_cron_env_fallback(monkeypatch):
+    """A completed interactive turn must not mask a later env-only cron run."""
+    from gateway.session_context import (
+        clear_session_vars,
+        reset_session_vars,
+        set_session_vars,
+    )
+
+    monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+    tokens = set_session_vars(platform="telegram")
+    assert A._is_cron_approval_context() is False
+
+    clear_session_vars(tokens)
+    try:
+        assert A._is_cron_approval_context() is True
+    finally:
+        reset_session_vars()
+
+
 def test_guard_gateway_user_approves_is_one_shot(gw_session):
     _register_resolver(gw_session, "once")
     res = A.check_execute_code_guard("import os; print(1)", "local")

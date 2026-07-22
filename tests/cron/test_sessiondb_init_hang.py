@@ -22,6 +22,7 @@ regardless of ``shutdown(wait=False)`` — an event left permanently unset
 would hang the whole test process at interpreter exit, not just this test.
 """
 
+import os
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -229,3 +230,46 @@ class TestDispatchGuardReleasedAfterHang:
             never_set.set()
             sched._running_job_ids.discard("guard-sessiondb-hang")
             sched._shutdown_parallel_pool()
+
+
+class TestCronApprovalContext:
+    def test_run_job_propagates_cron_context_without_mutating_process_env(
+        self, tmp_path, monkeypatch
+    ):
+        """Cron policy reaches the agent worker and disappears after the run."""
+        from tools import approval
+
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        job = {"id": "cron-context", "name": "test", "prompt": "hello"}
+        seen = []
+
+        def observe_cron_context(_prompt):
+            seen.append(approval._is_cron_approval_context())
+            return {"final_response": "ok"}
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("hermes_cli.env_loader.load_hermes_dotenv"), \
+             patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+             patch("hermes_state.SessionDB", return_value=MagicMock()), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "test-key",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.side_effect = observe_cron_context
+            mock_agent_cls.return_value = mock_agent
+
+            success, _output, final_response, _error = run_job(job)
+
+        assert success is True
+        assert final_response == "ok"
+        assert seen == [True]
+        assert approval._is_cron_approval_context() is False
+        assert "HERMES_CRON_SESSION" not in os.environ

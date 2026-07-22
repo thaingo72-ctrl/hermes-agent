@@ -113,8 +113,9 @@ _SESSION_PROFILE: ContextVar = ContextVar("HERMES_SESSION_PROFILE", default=_UNS
 # propagates that into this contextvar at session-bind time.
 _SESSION_ASYNC_DELIVERY: ContextVar = ContextVar("HERMES_SESSION_ASYNC_DELIVERY", default=_UNSET)
 
-# Cron auto-delivery vars — set per-job in run_job() so concurrent jobs
-# don't clobber each other's delivery targets.
+# Cron execution marker and auto-delivery vars — set per-job in run_job() so
+# concurrent cron and interactive sessions do not share approval/routing state.
+_CRON_SESSION: ContextVar = ContextVar("HERMES_CRON_SESSION", default=_UNSET)
 _CRON_AUTO_DELIVER_PLATFORM: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", default=_UNSET)
 _CRON_AUTO_DELIVER_CHAT_ID: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_CHAT_ID", default=_UNSET)
 _CRON_AUTO_DELIVER_THREAD_ID: ContextVar = ContextVar("HERMES_CRON_AUTO_DELIVER_THREAD_ID", default=_UNSET)
@@ -132,6 +133,7 @@ _VAR_MAP = {
     "HERMES_UI_SESSION_ID": _SESSION_UI_SESSION_ID,
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
     "HERMES_SESSION_PROFILE": _SESSION_PROFILE,
+    "HERMES_CRON_SESSION": _CRON_SESSION,
     "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
@@ -168,14 +170,14 @@ def set_session_vars(
     cwd: str = "",
     async_delivery: bool = True,
     ui_session_id: str = "",
+    cron_session: bool = False,
 ) -> list:
     """Set all session context variables and return reset tokens.
 
     Call ``clear_session_vars(tokens)`` in a ``finally`` block when the handler
-    exits. Note ``clear_session_vars`` resets every var to ``""`` (to suppress
-    the ``os.environ`` fallback) rather than restoring prior values — these
-    helpers are not nestable/stack-safe, and the returned tokens are accepted
-    only for API compatibility.
+    exits. These helpers are intentionally non-nestable: teardown clears
+    routing identity and restores the cron marker to its ``_UNSET`` fallback
+    state. Returned tokens are accepted only for API compatibility.
 
     ``cwd`` pins the logical working directory for this context.
 
@@ -202,6 +204,7 @@ def set_session_vars(
         _SESSION_UI_SESSION_ID.set(ui_session_id),
         _SESSION_MESSAGE_ID.set(message_id),
         _SESSION_PROFILE.set(profile),
+        _CRON_SESSION.set("1" if cron_session else ""),
         _SESSION_ASYNC_DELIVERY.set(bool(async_delivery)),
     ]
     try:
@@ -216,13 +219,15 @@ def set_session_vars(
 def clear_session_vars(tokens: list) -> None:
     """Mark session context variables as explicitly cleared.
 
-    Sets all variables to ``""`` so that ``get_session_env`` returns an empty
-    string instead of falling back to (potentially stale) ``os.environ``
-    values.  The *tokens* argument is accepted for API compatibility with
-    callers that saved the return value of ``set_session_vars``, but the
-    actual clearing uses ``var.set("")`` rather than ``var.reset(token)``
-    to ensure the "explicitly cleared" state is distinguishable from
-    "never set" (which holds the ``_UNSET`` sentinel).
+    Routing identity variables are set to ``""`` so ``get_session_env`` returns
+    empty instead of falling back to potentially stale process-global values.
+    The cron approval marker is the deliberate exception: it returns to
+    ``_UNSET`` so a later legacy env-only cron caller can still honor
+    ``HERMES_CRON_SESSION=1`` and remain fail-closed.
+
+    The *tokens* argument is accepted for API compatibility with callers that
+    saved the return value of ``set_session_vars``; these helpers remain
+    intentionally non-nestable.
     """
     for var in (
         _SESSION_PLATFORM,
@@ -239,6 +244,12 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_PROFILE,
     ):
         var.set("")
+    # Cron differs from ordinary routing identity: an explicitly-cleared
+    # interactive marker must not permanently suppress a later legacy
+    # HERMES_CRON_SESSION environment marker in this same process. Active
+    # sessions still bind cron_session=False; after teardown restore _UNSET so
+    # standalone/env-only cron callers retain fail-closed compatibility.
+    _CRON_SESSION.set(_UNSET)
     # Reset async-delivery capability to the "never set" sentinel rather than a
     # falsy value: a cleared context should fall back to the default-supported
     # behavior (CLI / unaware paths), not be mistaken for an opted-out
