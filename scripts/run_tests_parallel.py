@@ -302,12 +302,18 @@ def _run_one_file(
     orphan onto PID 1. This outer timeout exists only to
     bound a pathologically slow or hung file as a whole.
     """
+    def _attempt_home(attempt_index: int) -> Path:
+        """Return a pristine HERMES_HOME for one pytest subprocess attempt."""
+        home = isolated_hermes_home / f"attempt-{attempt_index}"
+        home.mkdir()
+        return home
+
     file, rc, output, summary, subproc_wall = _run_one_file_once(
         file,
         pytest_args,
         repo_root,
         file_timeout,
-        isolated_hermes_home,
+        _attempt_home(0),
         shutdown_requested,
         active_processes,
         active_processes_lock,
@@ -321,7 +327,7 @@ def _run_one_file(
             pytest_args,
             repo_root,
             file_timeout,
-            isolated_hermes_home,
+            _attempt_home(attempt),
             shutdown_requested,
             active_processes,
             active_processes_lock,

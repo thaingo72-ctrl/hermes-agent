@@ -649,6 +649,54 @@ def test_file_retry_self_heals_and_prints_both_attempts(tmp_path: Path) -> None:
     assert "retry output" in proc.stdout
 
 
+def test_file_retry_uses_fresh_hermes_home_for_each_attempt(tmp_path: Path) -> None:
+    """A retry must not pass because the failed attempt poisoned runner state."""
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    probe = tmp_path / "test_home_poison_probe.py"
+    probe.write_text(
+        textwrap.dedent(
+            """
+            import os
+            from pathlib import Path
+
+            ATTEMPT_HOME = Path(os.environ["HERMES_HOME"])
+            POISON = ATTEMPT_HOME / "failed-attempt-marker"
+
+            def test_failed_attempt_state_is_not_reused():
+                if POISON.exists():
+                    return
+                POISON.write_text("poisoned by failed attempt")
+                assert False, "failed attempt poisoned HERMES_HOME"
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(runner),
+            "--files",
+            str(probe),
+            "--file-retries",
+            "1",
+            "-j",
+            "1",
+            "-q",
+        ],
+        cwd=repo_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 1, proc.stdout
+    assert "failed attempt poisoned HERMES_HOME" in proc.stdout
+    assert "FLAKY file" not in proc.stdout
+
+
 def test_file_retry_does_not_launder_deterministic_failure(tmp_path: Path) -> None:
     """A real regression fails both attempts and the runner remains red."""
     repo_root = Path(__file__).resolve().parent.parent
