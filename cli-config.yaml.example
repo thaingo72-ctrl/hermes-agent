@@ -1210,7 +1210,7 @@ delegation:
                                               # or auto-approve "once" (true) instead of blocking on stdin.
                                               # The parent TUI owns stdin, so blocking would deadlock; non-interactive resolution is required.
                                               # Both choices emit a logger.warning audit line. Flip to true only for cron/batch pipelines.
-  # inherit_mcp_toolsets: true                # When explicit child toolsets are narrowed, also keep the parent's MCP toolsets (default: true). Set false for strict intersection.
+  # inherit_mcp_toolsets: true                # Whether children receive parent MCP toolsets (default: true). Set false to strip mcp-* on every child-build path, including normal delegate_task (toolsets unset).
   # child_toolsets: ["file", "web"]           # Server-enforced narrowing for ALL delegated children: intersected with the
                                               # parent's toolsets, blocked tools always stripped, MCP toolsets kept unless
                                               # inherit_mcp_toolsets is false. Unset/empty = children inherit the parent's
