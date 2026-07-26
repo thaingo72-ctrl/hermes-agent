@@ -2091,6 +2091,38 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         self.assertIn("mcp-hound", disabled)
         self.assertIn("mcp-agentmail", disabled)
 
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"inherit_mcp_toolsets": False},
+    )
+    def test_build_child_agent_strips_configured_mcp_alias_before_registration(
+        self, mock_cfg
+    ):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["file", "robinhood-review"]
+        full_cfg = {"mcp_servers": {"robinhood-review": {"enabled": True}}}
+
+        with patch("run_agent.AIAgent") as MockAgent, patch(
+            "tools.registry.registry.get_toolset_alias_target", return_value=None
+        ), patch("hermes_cli.config.load_config", return_value=full_cfg):
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="Configured alias must fail closed before registration",
+                context=None,
+                toolsets=["file", "robinhood-review"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        enabled = MockAgent.call_args[1]["enabled_toolsets"]
+        disabled = MockAgent.call_args[1]["disabled_toolsets"]
+        self.assertIn("file", enabled)
+        self.assertNotIn("robinhood-review", enabled)
+        self.assertIn("robinhood-review", disabled)
+
     @patch("tools.delegate_tool._load_config", return_value={})
     def test_build_child_agent_keeps_mcp_on_full_parent_inherit_by_default(
         self, mock_cfg
@@ -3437,6 +3469,40 @@ class TestDelegationIsolationState(unittest.TestCase):
         ), patch(
             "tools.registry.registry.get_toolset_alias_target",
             side_effect=lambda n: "mcp-github" if n == "gh" else None,
+        ):
+            self.assertEqual(
+                delegation_isolation_state(),
+                {
+                    "safe_delegation_isolation": True,
+                    "delegation_mcp_isolation": False,
+                },
+            )
+
+    def test_configured_mcp_alias_before_registration_fails_closed(self):
+        cfg = {
+            "child_toolsets": ["file", "robinhood-review"],
+            "inherit_mcp_toolsets": False,
+        }
+        full_cfg = {"mcp_servers": {"robinhood-review": {"enabled": True}}}
+        with patch("tools.delegate_tool._load_config", return_value=cfg), patch(
+            "tools.registry.registry.get_toolset_alias_target", return_value=None
+        ), patch("hermes_cli.config.load_config", return_value=full_cfg):
+            self.assertEqual(
+                delegation_isolation_state(),
+                {
+                    "safe_delegation_isolation": True,
+                    "delegation_mcp_isolation": False,
+                },
+            )
+
+    def test_mcp_alias_lookup_error_fails_closed(self):
+        cfg = {
+            "child_toolsets": ["file", "possibly-mcp"],
+            "inherit_mcp_toolsets": False,
+        }
+        with patch("tools.delegate_tool._load_config", return_value=cfg), patch(
+            "tools.registry.registry.get_toolset_alias_target",
+            side_effect=RuntimeError("registry unavailable"),
         ):
             self.assertEqual(
                 delegation_isolation_state(),

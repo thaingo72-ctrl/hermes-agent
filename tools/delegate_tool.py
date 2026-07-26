@@ -591,18 +591,35 @@ def _strip_mcp_toolsets(toolsets: List[str]) -> List[str]:
 
 
 def _is_mcp_toolset_name(name: str) -> bool:
-    """Return True for canonical MCP toolsets and their registered aliases."""
+    """Return True for canonical MCP toolsets and configured/registered aliases.
+
+    Fail closed when alias discovery itself is unavailable: this helper gates
+    both runtime stripping and the externally advertised MCP-isolation flag.
+    A configured MCP server name counts as an alias even before dynamic MCP
+    registration completes, preventing startup-time capability over-claims.
+    """
     if not name:
         return False
-    if str(name).startswith("mcp-"):
+    text = str(name)
+    if text.startswith("mcp-"):
         return True
     try:
         from tools.registry import registry
 
-        target = registry.get_toolset_alias_target(str(name))
+        target = registry.get_toolset_alias_target(text)
     except Exception:
-        target = None
-    return bool(target and str(target).startswith("mcp-"))
+        return True
+    if target:
+        return str(target).startswith("mcp-")
+
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        servers = cfg.get("mcp_servers", {})
+    except Exception:
+        return True
+    return isinstance(servers, dict) and text in servers
 
 
 def _expand_parent_toolsets(parent_toolsets: set) -> set:
