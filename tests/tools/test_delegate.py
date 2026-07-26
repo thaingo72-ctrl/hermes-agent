@@ -2095,6 +2095,45 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         "tools.delegate_tool._load_config",
         return_value={"inherit_mcp_toolsets": False},
     )
+    def test_full_inherit_concretizes_hermes_cli_when_mcp_isolated(self, mock_cfg):
+        """The default mixed CLI bundle must retain bounded non-MCP tools."""
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["hermes-cli"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="Default parent keeps safe child capabilities",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+
+        enabled = MockAgent.call_args[1]["enabled_toolsets"]
+        self.assertNotIn("hermes-cli", enabled)
+        for name in ("terminal", "file", "web"):
+            self.assertIn(name, enabled)
+
+        import model_tools
+
+        definitions = model_tools.get_tool_definitions(
+            enabled_toolsets=enabled,
+            disabled_toolsets=MockAgent.call_args[1]["disabled_toolsets"],
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        )
+        names = {item["function"]["name"] for item in definitions}
+        self.assertTrue(names & {"terminal", "read_file", "web_search"})
+        self.assertFalse({name for name in names if name.startswith("mcp__")})
+
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"inherit_mcp_toolsets": False},
+    )
     def test_full_inherit_concretizes_broad_parent_when_mcp_isolated(self, mock_cfg):
         parent = _make_mock_parent()
         parent.enabled_toolsets = ["all"]

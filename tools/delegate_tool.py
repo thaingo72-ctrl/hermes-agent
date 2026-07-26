@@ -689,25 +689,47 @@ def _is_bounded_child_toolset_name(name: str, visited: Optional[set] = None) -> 
 
 
 def _concretize_broad_child_toolsets(toolsets: List[str]) -> List[str]:
-    """Replace all/* with the current finite set of bounded toolsets.
+    """Replace broad selectors with their current finite bounded toolsets.
 
-    Broad selectors are safe for a parent that intentionally inherits MCP, but
-    cannot survive into an MCP-isolated child: registry refresh would otherwise
-    make them absorb future MCP toolsets. The concrete result is filtered again
-    by the normal bounded/MCP rules before AIAgent construction.
+    ``all``/``*`` enumerate every currently known bounded toolset. Platform
+    bundles such as ``hermes-cli`` are expanded through their static tool
+    membership, then the caller's bounded/MCP filters remove unsafe results.
+    Keeping either selector on an MCP-isolated child would let a later registry
+    refresh absorb new MCP tools; dropping a mixed platform bundle wholesale
+    would instead leave the default child with no tools.
     """
-    if not any(str(name) in {"all", "*"} for name in toolsets):
+    broad = [
+        str(name)
+        for name in toolsets
+        if str(name) in {"all", "*"} or str(name).startswith("hermes-")
+    ]
+    if not broad:
         return list(toolsets)
-    concrete = [name for name in toolsets if str(name) not in {"all", "*"}]
-    try:
-        from toolsets import get_all_toolsets
 
-        candidates = get_all_toolsets()
-    except Exception:
-        candidates = []
-    concrete.extend(
-        name for name in candidates if _is_bounded_child_toolset_name(name)
-    )
+    concrete: List[str] = []
+    for name in toolsets:
+        text = str(name)
+        if text in {"all", "*"}:
+            continue
+        if text.startswith("hermes-"):
+            concrete.extend(
+                candidate
+                for candidate in _expand_parent_toolsets({text})
+                if candidate != text
+            )
+        else:
+            concrete.append(name)
+
+    if any(name in {"all", "*"} for name in broad):
+        try:
+            from toolsets import get_all_toolsets
+
+            candidates = get_all_toolsets()
+        except Exception:
+            candidates = []
+        concrete.extend(
+            name for name in candidates if _is_bounded_child_toolset_name(name)
+        )
     return list(dict.fromkeys(concrete))
 
 
