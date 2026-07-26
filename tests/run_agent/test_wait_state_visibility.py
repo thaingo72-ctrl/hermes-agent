@@ -11,6 +11,7 @@ gateway's "⏳ Working — N min" heartbeat includes).
 from __future__ import annotations
 
 import sys
+import threading
 import time
 import types
 from types import SimpleNamespace
@@ -121,3 +122,70 @@ def test_nonstream_wait_loop_emits_explained_notice(tmp_path, monkeypatch):
     reconnect_notices = [s for s in seen if "reconnecting" in s]
     assert reconnect_notices, f"expected a reconnect wait-notice, saw: {seen}"
     assert "no response from provider" in reconnect_notices[0]
+
+
+def test_guarded_codex_wait_notice_uses_request_local_event_timestamp(
+    tmp_path, monkeypatch
+):
+    """Wait visibility must observe SSE activity owned by the request guard."""
+    from agent import chat_completion_helpers as h
+
+    agent = _make_agent(tmp_path, monkeypatch)
+    agent.api_mode = "codex_responses"
+    monkeypatch.setattr(
+        agent, "_compute_non_stream_stale_timeout", lambda *a, **k: 60.0
+    )
+    dummy_client = SimpleNamespace()
+    monkeypatch.setattr(
+        agent, "_create_request_openai_client", lambda **k: dummy_client
+    )
+    monkeypatch.setattr(
+        agent, "_abort_request_openai_client", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        agent, "_close_request_openai_client", lambda *a, **k: None
+    )
+    monkeypatch.setenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", "0")
+    monkeypatch.setenv("HERMES_CODEX_EVENT_STALE_TIMEOUT_SECONDS", "0")
+    monkeypatch.setenv("HERMES_CODEX_HARD_TIMEOUT_SECONDS", "0")
+
+    release_worker = threading.Event()
+    guard_marked = threading.Event()
+    sentinel = SimpleNamespace(ok=True)
+
+    def fake_stream(
+        api_kwargs, client=None, on_first_delta=None, request_guard=None
+    ):
+        assert request_guard is not None
+        assert request_guard.mark_event(123.0) is True
+        guard_marked.set()
+        assert release_worker.wait(2)
+        return sentinel
+
+    monkeypatch.setattr(agent, "_run_codex_stream", fake_stream)
+    observed_event_times: list[float | None] = []
+
+    def capture_recovery(**kwargs):
+        observed_event_times.append(kwargs["last_event_ts"])
+        release_worker.set()
+        return "event activity observed"
+
+    monkeypatch.setattr(h, "_codex_wait_notice_recovery", capture_recovery)
+    original_join = threading.Thread.join
+
+    def fast_join(self, timeout=None):
+        return original_join(self, timeout=0.001)
+
+    monkeypatch.setattr(threading.Thread, "join", fast_join)
+
+    try:
+        response = h.interruptible_api_call(
+            agent, {"model": "gpt-5.6-sol", "input": "hi"}
+        )
+    finally:
+        release_worker.set()
+
+    assert guard_marked.is_set()
+    assert response is sentinel
+    assert observed_event_times == [123.0]
+    assert agent._codex_stream_last_event_ts is None

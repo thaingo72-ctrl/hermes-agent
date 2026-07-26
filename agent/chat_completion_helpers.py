@@ -876,9 +876,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                     stale_timeout=_stale_timeout,
                     ttfb_enabled=_ttfb_enabled,
                     ttfb_timeout=_ttfb_timeout,
-                    last_event_ts=getattr(
-                        agent, "_codex_stream_last_event_ts", None
-                    ),
+                    last_event_ts=_codex_last_event_ts(),
                     call_start=_call_start,
                     idle_enabled=_codex_idle_enabled,
                     idle_timeout=_codex_idle_timeout,
