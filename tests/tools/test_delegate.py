@@ -2095,6 +2095,80 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         "tools.delegate_tool._load_config",
         return_value={"inherit_mcp_toolsets": False},
     )
+    def test_full_inherit_concretizes_broad_parent_when_mcp_isolated(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["all"]
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="Broad parent must become a finite non-MCP surface",
+                context=None,
+                toolsets=None,
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+        enabled = MockAgent.call_args[1]["enabled_toolsets"]
+        disabled = MockAgent.call_args[1]["disabled_toolsets"]
+        self.assertNotIn("all", enabled)
+        self.assertNotIn("*", enabled)
+        self.assertIn("file", enabled)
+        self.assertFalse({name for name in enabled if name.startswith("mcp-")})
+
+        # A registry refresh after child construction must not be able to add a
+        # newly discovered MCP schema through the parent's former "all" selector.
+        from model_tools import get_tool_definitions
+        from tools.registry import registry
+
+        late_name = "mcp__late_isolation_probe__read"
+        registry.register(
+            name=late_name,
+            toolset="mcp-late-isolation-probe",
+            schema={
+                "name": late_name,
+                "description": "Late MCP isolation regression probe",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=lambda *_args, **_kwargs: "{}",
+        )
+        try:
+            definitions = get_tool_definitions(
+                enabled_toolsets=enabled,
+                disabled_toolsets=disabled,
+                quiet_mode=True,
+            )
+            names = {definition["function"]["name"] for definition in definitions}
+            self.assertNotIn(late_name, names)
+        finally:
+            registry.deregister(late_name)
+
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"inherit_mcp_toolsets": False},
+    )
+    def test_narrowed_child_can_select_file_from_broad_parent(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["all"]
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="A broad parent contains bounded file capability",
+                context=None,
+                toolsets=["file"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+        self.assertEqual(MockAgent.call_args[1]["enabled_toolsets"], ["file"])
+
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"inherit_mcp_toolsets": False},
+    )
     def test_build_child_agent_strips_configured_mcp_alias_before_registration(
         self, mock_cfg
     ):

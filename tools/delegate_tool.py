@@ -688,6 +688,29 @@ def _is_bounded_child_toolset_name(name: str, visited: Optional[set] = None) -> 
     )
 
 
+def _concretize_broad_child_toolsets(toolsets: List[str]) -> List[str]:
+    """Replace all/* with the current finite set of bounded toolsets.
+
+    Broad selectors are safe for a parent that intentionally inherits MCP, but
+    cannot survive into an MCP-isolated child: registry refresh would otherwise
+    make them absorb future MCP toolsets. The concrete result is filtered again
+    by the normal bounded/MCP rules before AIAgent construction.
+    """
+    if not any(str(name) in {"all", "*"} for name in toolsets):
+        return list(toolsets)
+    concrete = [name for name in toolsets if str(name) not in {"all", "*"}]
+    try:
+        from toolsets import get_all_toolsets
+
+        candidates = get_all_toolsets()
+    except Exception:
+        candidates = []
+    concrete.extend(
+        name for name in candidates if _is_bounded_child_toolset_name(name)
+    )
+    return list(dict.fromkeys(concrete))
+
+
 def _expand_parent_toolsets(parent_toolsets: set) -> set:
     """Expand composite toolsets so individual toolset names are recognized.
 
@@ -1267,6 +1290,7 @@ def _build_child_agent(
     tui_depth = max(0, child_depth - 1)  # 0 = first-level child for the UI
 
     delegation_cfg = _load_config()
+    inherit_mcp_toolsets = _get_inherit_mcp_toolsets()
 
     # When no explicit toolsets given, inherit from parent's enabled toolsets
     # so disabled tools (e.g. web) don't leak to subagents.
@@ -1293,8 +1317,11 @@ def _build_child_agent(
         # toolset names (e.g. web, terminal) are recognised during intersection.
         expanded_parent = _expand_parent_toolsets(parent_toolsets)
         bounded_requested = [t for t in toolsets if _is_bounded_child_toolset_name(t)]
-        child_toolsets = [t for t in bounded_requested if t in expanded_parent]
-        if _get_inherit_mcp_toolsets():
+        if parent_toolsets.intersection({"all", "*"}):
+            child_toolsets = bounded_requested
+        else:
+            child_toolsets = [t for t in bounded_requested if t in expanded_parent]
+        if inherit_mcp_toolsets:
             child_toolsets = _preserve_parent_mcp_toolsets(
                 child_toolsets, parent_toolsets
             )
@@ -1310,7 +1337,11 @@ def _build_child_agent(
     # branch already skips _preserve_parent_mcp_toolsets when false; full
     # parent inherit still carried mcp-* toolsets until this strip.
     mcp_denies: List[str] = []
-    if not _get_inherit_mcp_toolsets():
+    if not inherit_mcp_toolsets:
+        child_toolsets = _concretize_broad_child_toolsets(child_toolsets)
+        child_toolsets = [
+            name for name in child_toolsets if _is_bounded_child_toolset_name(name)
+        ]
         child_toolsets = _strip_mcp_toolsets(child_toolsets)
         # Also subtract via disabled_toolsets so composite/platform bundles
         # cannot reintroduce MCP tools after expansion (#17309 pattern).
