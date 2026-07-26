@@ -2125,6 +2125,50 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
 
     @patch(
         "tools.delegate_tool._load_config",
+        return_value={"inherit_mcp_toolsets": True},
+    )
+    def test_mcp_lookup_failures_cannot_broaden_narrowed_child(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["file", "terminal", "web"]
+
+        def build_with(*extra_patches):
+            from contextlib import ExitStack
+
+            with ExitStack() as stack:
+                MockAgent = stack.enter_context(patch("run_agent.AIAgent"))
+                for patcher in extra_patches:
+                    stack.enter_context(patcher)
+                MockAgent.return_value = MagicMock()
+                _build_child_agent(
+                    task_index=0,
+                    goal="Unknown MCP status must not broaden child",
+                    context=None,
+                    toolsets=["file"],
+                    model=None,
+                    max_iterations=10,
+                    parent_agent=parent,
+                    task_count=1,
+                )
+            return MockAgent.call_args[1]["enabled_toolsets"]
+
+        registry_error = build_with(
+            patch(
+                "tools.registry.registry.get_toolset_alias_target",
+                side_effect=RuntimeError("registry unavailable"),
+            )
+        )
+        config_error = build_with(
+            patch("tools.registry.registry.get_toolset_alias_target", return_value=None),
+            patch(
+                "hermes_cli.config.load_config",
+                side_effect=RuntimeError("config unavailable"),
+            ),
+        )
+        self.assertEqual(registry_error, ["file"])
+        self.assertEqual(config_error, ["file"])
+
+    @patch(
+        "tools.delegate_tool._load_config",
         return_value={"inherit_mcp_toolsets": False},
     )
     def test_build_child_agent_denies_kanban_environment_auto_add(self, mock_cfg):

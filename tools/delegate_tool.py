@@ -596,39 +596,60 @@ def delegation_isolation_state() -> Dict[str, bool]:
 
 def _strip_mcp_toolsets(toolsets: List[str]) -> List[str]:
     """Drop canonical MCP toolsets (and registered MCP aliases) from a list."""
-    return [t for t in toolsets if not _is_mcp_toolset_name(t)]
+    return [t for t in toolsets if not _is_mcp_toolset_name(t, fail_closed=True)]
 
 
-def _is_mcp_toolset_name(name: str) -> bool:
-    """Return True for canonical MCP toolsets and configured/registered aliases.
+def _mcp_toolset_status(name: str) -> Optional[bool]:
+    """Tri-state MCP classification: True, False, or None when lookup is unknown.
 
-    Fail closed when alias discovery itself is unavailable: this helper gates
-    both runtime stripping and the externally advertised MCP-isolation flag.
     A configured MCP server name counts as an alias even before dynamic MCP
-    registration completes, preventing startup-time capability over-claims.
+    registration completes. Registry and config are independent evidence
+    sources; a positive result from either wins, while a failure in either
+    leaves a non-positive result unknown rather than incorrectly non-MCP.
     """
     if not name:
         return False
     text = str(name)
     if text.startswith("mcp-"):
         return True
+
+    registry_ok = True
     try:
         from tools.registry import registry
 
         target = registry.get_toolset_alias_target(text)
     except Exception:
+        registry_ok = False
+        target = None
+    if target and str(target).startswith("mcp-"):
         return True
-    if target:
-        return str(target).startswith("mcp-")
 
+    config_ok = True
     try:
         from hermes_cli.config import load_config
 
         cfg = load_config() or {}
         servers = cfg.get("mcp_servers", {})
     except Exception:
+        config_ok = False
+        servers = {}
+    if isinstance(servers, dict) and text in servers:
         return True
-    return isinstance(servers, dict) and text in servers
+    if registry_ok and config_ok:
+        return False
+    return None
+
+
+def _is_mcp_toolset_name(name: str, *, fail_closed: bool = False) -> bool:
+    """Classify an MCP toolset with caller-specific unknown handling.
+
+    Restrictive callers (strip/deny) pass ``fail_closed=True`` so lookup errors
+    remove unknown surfaces. Permissive callers (legacy MCP preservation) keep
+    the default and preserve only definite MCP matches, preventing an outage
+    from broadening a narrowed child.
+    """
+    status = _mcp_toolset_status(name)
+    return fail_closed if status is None else status
 
 
 def _is_bounded_child_toolset_name(name: str, visited: Optional[set] = None) -> bool:
@@ -1293,7 +1314,11 @@ def _build_child_agent(
         child_toolsets = _strip_mcp_toolsets(child_toolsets)
         # Also subtract via disabled_toolsets so composite/platform bundles
         # cannot reintroduce MCP tools after expansion (#17309 pattern).
-        mcp_denies = sorted(t for t in parent_toolsets if _is_mcp_toolset_name(t))
+        mcp_denies = sorted(
+            t
+            for t in parent_toolsets
+            if _is_mcp_toolset_name(t, fail_closed=True)
+        )
 
     # Blocked tools also live inside mixed platform bundles (hermes-cli,
     # hermes-telegram, etc.) that _strip_blocked_tools must keep because they
