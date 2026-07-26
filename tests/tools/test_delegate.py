@@ -2123,6 +2123,41 @@ class TestChildCredentialPoolResolution(unittest.TestCase):
         self.assertNotIn("robinhood-review", enabled)
         self.assertIn("robinhood-review", disabled)
 
+    @patch(
+        "tools.delegate_tool._load_config",
+        return_value={"inherit_mcp_toolsets": False},
+    )
+    def test_build_child_agent_denies_kanban_environment_auto_add(self, mock_cfg):
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["file"]
+        with patch.dict("os.environ", {"HERMES_KANBAN_TASK": "task-123"}), patch(
+            "run_agent.AIAgent"
+        ) as MockAgent:
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="Delegated child must not inherit parent kanban lifecycle",
+                context=None,
+                toolsets=["file"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+        disabled_toolsets = MockAgent.call_args[1]["disabled_toolsets"]
+        self.assertIn("kanban", disabled_toolsets)
+        with patch.dict("os.environ", {"HERMES_KANBAN_TASK": "task-123"}):
+            import model_tools
+
+            definitions = model_tools.get_tool_definitions(
+                enabled_toolsets=["file"],
+                disabled_toolsets=disabled_toolsets,
+                quiet_mode=True,
+            )
+        names = {item["function"]["name"] for item in definitions}
+        self.assertIn("read_file", names)
+        self.assertFalse({name for name in names if name.startswith("kanban_")})
+
     @patch("tools.delegate_tool._load_config", return_value={})
     def test_build_child_agent_keeps_mcp_on_full_parent_inherit_by_default(
         self, mock_cfg
@@ -3369,7 +3404,7 @@ class TestChildToolsetsConfig(unittest.TestCase):
     def test_configured_list_is_cleaned(self):
         cfg = {"child_toolsets": ["file", " web ", "", 42]}
         with patch("tools.delegate_tool._load_config", return_value=cfg):
-            self.assertEqual(_get_child_toolsets(), ["file", "web", "42"])
+            self.assertEqual(_get_child_toolsets(), ["file", "web"])
 
     def test_non_list_and_empty_values_mean_no_narrowing(self):
         for raw in ("file", {"a": 1}, [], ["  ", ""], None, True):
@@ -3378,6 +3413,42 @@ class TestChildToolsetsConfig(unittest.TestCase):
                 return_value={"child_toolsets": raw},
             ):
                 self.assertIsNone(_get_child_toolsets(), raw)
+
+    def test_broad_dynamic_and_unknown_toolsets_fail_closed(self):
+        cfg = {
+            "child_toolsets": [
+                "all",
+                "*",
+                "hermes-cli",
+                "not-yet-known-plugin",
+                "file",
+            ]
+        }
+        with patch("tools.delegate_tool._load_config", return_value=cfg):
+            self.assertEqual(_get_child_toolsets(), ["file"])
+
+        with patch(
+            "tools.delegate_tool._load_config",
+            return_value={"child_toolsets": ["all"]},
+        ):
+            self.assertEqual(_get_child_toolsets(), [])
+
+    def test_empty_effective_toolsets_do_not_revert_to_full_inherit(self):
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["file", "web"]
+        with patch("run_agent.AIAgent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="Fail closed after rejecting broad child toolsets",
+                context=None,
+                toolsets=[],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+            )
+        self.assertEqual(MockAgent.call_args[1]["enabled_toolsets"], [])
 
     def test_configured_toolsets_reach_child_narrowing(self):
         """The config value must flow into _build_child_agent's intersection
@@ -3445,24 +3516,38 @@ class TestDelegationIsolationState(unittest.TestCase):
                 },
             )
 
-    def test_explicit_mcp_selection_does_not_claim_mcp_isolation(self):
-        """An MCP toolset named directly in child_toolsets survives the
-        intersection in _build_child_agent, so the child keeps it even with
-        inherit_mcp_toolsets: false. delegation_mcp_isolation must stay False
-        rather than over-claim — for both the mcp- prefix and registered
-        aliases that resolve to an mcp- toolset. safe_delegation_isolation stays
-        True: narrowing is still in effect."""
-        # (1) canonical mcp- prefix
-        cfg = {"child_toolsets": ["file", "mcp-github"], "inherit_mcp_toolsets": False}
+    def test_no_child_narrowing_but_mcp_inheritance_disabled_claims_only_mcp_isolation(
+        self,
+    ):
+        cfg = {"inherit_mcp_toolsets": False}
+        with patch("tools.delegate_tool._load_config", return_value=cfg):
+            self.assertEqual(
+                delegation_isolation_state(),
+                {
+                    "safe_delegation_isolation": False,
+                    "delegation_mcp_isolation": True,
+                },
+            )
+
+    def test_explicit_mcp_selection_is_still_stripped_when_inheritance_disabled(self):
+        """The full-path MCP strip runs after child-toolset intersection.
+
+        Therefore an explicitly selected canonical MCP toolset or registered
+        alias is removed whenever inherit_mcp_toolsets is false, and the live
+        capability can truthfully report MCP isolation.
+        """
+        cfg = {
+            "child_toolsets": ["file", "mcp-github"],
+            "inherit_mcp_toolsets": False,
+        }
         with patch("tools.delegate_tool._load_config", return_value=cfg):
             self.assertEqual(
                 delegation_isolation_state(),
                 {
                     "safe_delegation_isolation": True,
-                    "delegation_mcp_isolation": False,
+                    "delegation_mcp_isolation": True,
                 },
             )
-        # (2) alias resolving to an mcp- toolset
         cfg = {"child_toolsets": ["file", "gh"], "inherit_mcp_toolsets": False}
         with patch(
             "tools.delegate_tool._load_config", return_value=cfg
@@ -3474,11 +3559,11 @@ class TestDelegationIsolationState(unittest.TestCase):
                 delegation_isolation_state(),
                 {
                     "safe_delegation_isolation": True,
-                    "delegation_mcp_isolation": False,
+                    "delegation_mcp_isolation": True,
                 },
             )
 
-    def test_configured_mcp_alias_before_registration_fails_closed(self):
+    def test_configured_mcp_alias_before_registration_is_isolated(self):
         cfg = {
             "child_toolsets": ["file", "robinhood-review"],
             "inherit_mcp_toolsets": False,
@@ -3491,11 +3576,11 @@ class TestDelegationIsolationState(unittest.TestCase):
                 delegation_isolation_state(),
                 {
                     "safe_delegation_isolation": True,
-                    "delegation_mcp_isolation": False,
+                    "delegation_mcp_isolation": True,
                 },
             )
 
-    def test_mcp_alias_lookup_error_fails_closed(self):
+    def test_mcp_alias_lookup_error_fails_closed_and_reports_isolation(self):
         cfg = {
             "child_toolsets": ["file", "possibly-mcp"],
             "inherit_mcp_toolsets": False,
@@ -3508,7 +3593,7 @@ class TestDelegationIsolationState(unittest.TestCase):
                 delegation_isolation_state(),
                 {
                     "safe_delegation_isolation": True,
-                    "delegation_mcp_isolation": False,
+                    "delegation_mcp_isolation": True,
                 },
             )
 

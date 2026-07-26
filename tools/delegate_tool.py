@@ -541,20 +541,31 @@ def _get_inherit_mcp_toolsets() -> bool:
 def _get_child_toolsets() -> Optional[List[str]]:
     """Operator-configured toolsets for delegated children (delegation.child_toolsets).
 
-    Returns a cleaned list of toolset names, or None when unset/empty — None
-    preserves the historical behavior (children inherit the parent's toolsets).
-    A configured list re-enters the narrowing path in _build_child_agent:
-    intersection with the parent's expanded toolsets, optional MCP-toolset
-    preservation (inherit_mcp_toolsets), and the unconditional blocked-tool
-    strip. The model still has no toolsets argument — this is operator config,
-    not a model-facing choice.
+    Returns bounded, deduplicated toolset names. None means unset/empty and
+    preserves historical full-parent inheritance. A configured non-empty list
+    whose entries are all unsafe resolves to [] (deny all), never back to full
+    inheritance. ``all``/``*``, dynamic platform bundles, and unknown toolsets
+    are rejected because later registry refreshes could expand them beyond the
+    verified surface. The model has no toolsets argument — this is operator
+    config, not a model-facing choice.
     """
     cfg = _load_config()
     raw = cfg.get("child_toolsets")
     if not isinstance(raw, list):
         return None
-    cleaned = [str(t).strip() for t in raw if str(t).strip()]
-    return cleaned or None
+    cleaned = list(dict.fromkeys(str(t).strip() for t in raw if str(t).strip()))
+    if not cleaned:
+        return None
+    bounded = [name for name in cleaned if _is_bounded_child_toolset_name(name)]
+    rejected = [name for name in cleaned if name not in bounded]
+    if rejected:
+        logger.warning(
+            "Rejected unbounded delegation.child_toolsets entries: %s",
+            ", ".join(rejected),
+        )
+    # A non-empty configured list that resolves to no bounded toolsets must
+    # remain [] (deny all), not None (historical full-parent inheritance).
+    return bounded
 
 
 def delegation_isolation_state() -> Dict[str, bool]:
@@ -563,25 +574,23 @@ def delegation_isolation_state() -> Dict[str, bool]:
     safe_delegation_isolation — server-side child-toolset narrowing is active
     (delegation.child_toolsets configured): children run with a restricted,
     server-enforced toolset instead of inheriting everything the parent holds.
-    delegation_mcp_isolation — additionally, narrowed children hold no MCP
-    toolset: automatic MCP inheritance is off (delegation.inherit_mcp_toolsets:
-    false) AND the operator's own child_toolsets list names no MCP toolset. An
-    explicitly selected MCP toolset (mcp- prefix or a registered alias) survives
-    the intersection in _build_child_agent, so the child would still hold it —
-    the flag stays false there rather than over-claim isolation.
+    delegation_mcp_isolation — automatic MCP inheritance is off. The runtime
+    strip applies on every child-build path after intersection, including direct
+    MCP selections and configured/registered aliases, with durable disabled
+    toolsets preventing refresh-time reintroduction.
 
     Orchestrators use these to decide whether permitting delegate_task is safe
     for untrusted-content workloads; keep them truthful to live config.
     """
     child = _get_child_toolsets()
-    narrowed = bool(child)
+    narrowed = child is not None
+    inherit_mcp = _get_inherit_mcp_toolsets()
     return {
         "safe_delegation_isolation": narrowed,
-        "delegation_mcp_isolation": (
-            narrowed
-            and not _get_inherit_mcp_toolsets()
-            and not any(_is_mcp_toolset_name(t) for t in (child or []))
-        ),
+        # The full-path strip applies after intersection, including explicitly
+        # selected MCP names and aliases. This flag therefore tracks the MCP
+        # inheritance switch independently of general child-tool narrowing.
+        "delegation_mcp_isolation": not inherit_mcp,
     }
 
 
@@ -620,6 +629,42 @@ def _is_mcp_toolset_name(name: str) -> bool:
     except Exception:
         return True
     return isinstance(servers, dict) and text in servers
+
+
+def _is_bounded_child_toolset_name(name: str, visited: Optional[set] = None) -> bool:
+    """Whether a child toolset has a statically bounded expansion.
+
+    ``all``/``*`` and dynamic platform bundles can absorb newly registered MCP
+    tools after child construction. Unknown plugin names have the same problem.
+    Direct MCP names/aliases are bounded and remain eligible because the
+    inherit_mcp_toolsets=false full-path strip removes and durably denies them.
+    Static composites are accepted only when every included toolset is itself
+    bounded.
+    """
+    text = str(name or "").strip()
+    if not text or text in {"all", "*"} or text.startswith("hermes-"):
+        return False
+    if _is_mcp_toolset_name(text):
+        return True
+
+    if visited is None:
+        visited = set()
+    if text in visited:
+        return True
+    visited.add(text)
+
+    try:
+        from toolsets import get_toolset
+
+        definition = get_toolset(text, include_registry=False)
+    except Exception:
+        return False
+    if not definition or definition.get("posture"):
+        return False
+    return all(
+        _is_bounded_child_toolset_name(included, visited)
+        for included in definition.get("includes", [])
+    )
 
 
 def _expand_parent_toolsets(parent_toolsets: set) -> set:
@@ -1221,12 +1266,13 @@ def _build_child_agent(
     else:
         parent_toolsets = set(DEFAULT_TOOLSETS)
 
-    if toolsets:
+    if toolsets is not None:
         # Intersect with parent — subagent must not gain tools the parent lacks.
         # Expand composite toolsets (e.g. hermes-cli) so that individual
         # toolset names (e.g. web, terminal) are recognised during intersection.
         expanded_parent = _expand_parent_toolsets(parent_toolsets)
-        child_toolsets = [t for t in toolsets if t in expanded_parent]
+        bounded_requested = [t for t in toolsets if _is_bounded_child_toolset_name(t)]
+        child_toolsets = [t for t in bounded_requested if t in expanded_parent]
         if _get_inherit_mcp_toolsets():
             child_toolsets = _preserve_parent_mcp_toolsets(
                 child_toolsets, parent_toolsets

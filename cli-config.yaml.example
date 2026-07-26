@@ -1214,7 +1214,8 @@ delegation:
   # child_toolsets: ["file", "web"]           # Server-enforced narrowing for ALL delegated children: intersected with the
                                               # parent's toolsets, blocked tools always stripped, MCP toolsets kept unless
                                               # inherit_mcp_toolsets is false. Unset/empty = children inherit the parent's
-                                              # full toolsets (historical behavior). Live state is advertised in
+                                              # full toolsets (historical behavior). all/*, dynamic platform bundles, and
+                                              # unknown toolsets are rejected fail-closed. Live state is advertised in
                                               # GET /v1/capabilities features as safe_delegation_isolation / delegation_mcp_isolation.
   # model: "google/gemini-3-flash-preview"    # Override model for subagents (empty = inherit parent)
   # provider: "openrouter"                    # Override provider for subagents (empty = inherit parent)
