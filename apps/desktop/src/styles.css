@@ -862,17 +862,6 @@ code {
   -moz-tab-size: 2;
 }
 
-/* Arc-style multicolor action surface (static, not animated). Reusable on any
-   Button via className. Unlayered so it beats Tailwind's bg-*/
-text-* variant utilities. */ .btn-arc {
-  background-image: linear-gradient(110deg, #5b6cff 0%, #8b5cf6 28%, #d946ef 58%, #fb7185 82%, #fb923c 100%);
-  color: #fff;
-  border-color: transparent;
-}
-
-.btn-arc:hover:not(:disabled) {
-  filter: brightness(1.08) saturate(1.06);
-}
 
 /* Shared input chrome — mirrors composer hover/focus FX. Unlayered to beat Tailwind utilities. */
 /* Border strength is driven by the single --dt-input-border alpha knob (× the

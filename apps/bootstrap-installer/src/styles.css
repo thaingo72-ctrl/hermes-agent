@@ -27,8 +27,8 @@
  */
 @import '../../desktop/src/styles.css';
 
-/* Installer-only additions: a fade-in animation and a warm radial glow
-   for the welcome screen. Everything else inherits from the desktop. */
+/* Installer-only addition: a fade-in animation for the welcome screen.
+   Everything else inherits from the desktop. */
 @keyframes hermes-fade-in {
   from {
     opacity: 0;
@@ -42,14 +42,6 @@
 
 .hermes-fade-in {
   animation: hermes-fade-in 0.45s ease-out both;
-}
-
-.hermes-glow {
-  background: radial-gradient(
-    ellipse at center,
-    color-mix(in srgb, var(--ui-warm) 18%, transparent) 0%,
-    transparent 60%
-  );
 }
 
 /*

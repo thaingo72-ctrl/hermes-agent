@@ -608,7 +608,7 @@ function SessionRow({
                 )}
                 {session.is_active && (
                   <Badge tone="success" className="shrink-0 text-xs">
-                    <span className="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+                    <span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-current" />
                     {t.common.live}
                   </Badge>
                 )}

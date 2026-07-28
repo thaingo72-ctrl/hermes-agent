@@ -154,7 +154,7 @@ export function HackeryButton({
       className={cn(
         'group inline-flex items-center gap-2 rounded-md border border-(--stroke-nous) px-6 py-2.5',
         'font-mono text-xs font-semibold uppercase text-primary',
-        'transition-all duration-150 hover:border-primary/60 hover:bg-primary/[0.06]',
+        'transition-[color,background-color,border-color,opacity] duration-150 hover:border-primary/60 hover:bg-primary/[0.06]',
         'disabled:pointer-events-none disabled:opacity-50'
       )}
       disabled={disabled}

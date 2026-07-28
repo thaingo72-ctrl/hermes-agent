@@ -11,7 +11,7 @@ const portalAction = (url?: string): BillingRefusalPresentation['action'] => ({ 
 const retryMessage = (refusal: BillingRefusal): string => {
   const mins = refusal.retryAfter ? ` (try again in ~${Math.max(1, Math.round(refusal.retryAfter / 60))} min)` : ''
 
-  return `🟡 Too many charges right now${mins}. This isn't a payment failure.`
+  return `Too many charges right now${mins}. This isn't a payment failure.`
 }
 
 const stripeRetryMessage = (refusal: BillingRefusal): string => {
@@ -75,7 +75,7 @@ export const resolveRefusal = (refusal: BillingRefusal): BillingRefusalPresentat
     case 'idempotency_conflict':
       return {
         action: { type: 'none' },
-        message: '🔴 That charge key was already used for a different amount. Start a fresh top-up.',
+        message: 'That charge key was already used for a different amount. Start a fresh top-up.',
         title: 'Start a fresh top-up'
       }
 
@@ -83,7 +83,7 @@ export const resolveRefusal = (refusal: BillingRefusal): BillingRefusalPresentat
       return {
         action: portalAction(refusal.portalUrl),
         message:
-          '💳 No saved card for terminal charges yet. Set one up on the portal ' +
+          'No saved card for terminal charges yet. Set one up on the portal ' +
           "(one-time credit buys don't save a reusable card).",
         title: 'No saved card'
       }
@@ -101,8 +101,8 @@ export const resolveRefusal = (refusal: BillingRefusal): BillingRefusalPresentat
         action: portalAction(refusal.portalUrl),
         message:
           remaining != null
-            ? `🔴 Monthly spend cap reached — $${remaining} headroom left.`
-            : '🔴 Monthly spend cap reached.',
+            ? `Monthly spend cap reached — $${remaining} headroom left.`
+            : 'Monthly spend cap reached.',
         title: 'Monthly spend cap reached'
       }
     }

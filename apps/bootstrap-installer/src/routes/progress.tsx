@@ -83,7 +83,7 @@ export default function ProgressScreen({ bootstrap }: ProgressProps) {
             </div>
             <div className="h-1.5 w-full overflow-hidden rounded-full bg-(--ui-bg-tertiary)">
               <div
-                className="h-full bg-primary transition-all duration-300 ease-out"
+                className="h-full bg-primary transition-[width] duration-300 ease-out"
                 style={{ width: `${Math.max(2, progress.fraction * 100)}%` }}
               />
             </div>

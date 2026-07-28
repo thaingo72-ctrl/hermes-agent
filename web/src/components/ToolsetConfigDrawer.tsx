@@ -287,7 +287,7 @@ export function ToolsetConfigDrawer({ toolset, profile, onClose, onChanged }: Pr
                   key={provider.name}
                   className={cn(
                     "border border-border p-3",
-                    isActive && "border-emerald-500/60 bg-emerald-500/5",
+                    isActive && "border-primary/60",
                   )}
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -307,7 +307,7 @@ export function ToolsetConfigDrawer({ toolset, profile, onClose, onChanged }: Pr
                       )}
                     </div>
                     {isActive ? (
-                      <Badge tone="success" className="text-xs shrink-0">
+                      <Badge tone="outline" className="text-xs shrink-0">
                         <Check className="h-3 w-3 mr-0.5" /> Selected
                       </Badge>
                     ) : (

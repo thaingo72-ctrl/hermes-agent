@@ -51,8 +51,7 @@ const TONE_STYLES: Record<EmptyStateTone, { cube: string; primary: string }> = {
   },
   warning: {
     cube: 'text-amber-500/70 dark:text-amber-300/70',
-    primary:
-      'border-amber-400/40 bg-amber-50 text-amber-900 hover:bg-amber-100 dark:border-amber-300/30 dark:bg-amber-300/15 dark:text-amber-100 dark:hover:bg-amber-300/20'
+    primary: 'border-border bg-background text-foreground hover:bg-accent'
   }
 }
 
@@ -829,9 +828,9 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
           trailing={<EditControls dirty={dirty} onCancel={cancelEdit} onSave={() => void saveEdit()} saving={saving} />}
         />
         {conflict && (
-          <div className="shrink-0 border-b border-amber-400/40 bg-amber-50 px-3 py-2 text-[0.7rem] text-amber-900 dark:border-amber-300/30 dark:bg-amber-300/10 dark:text-amber-100">
+          <div className="shrink-0 border-b border-amber-500/50 bg-background px-3 py-2 text-[0.7rem] text-foreground">
             <div className="font-semibold">{t.preview.diskChangedTitle}</div>
-            <div className="mt-0.5 leading-relaxed">{t.preview.diskChangedBody}</div>
+            <div className="mt-0.5 leading-relaxed text-muted-foreground">{t.preview.diskChangedBody}</div>
             <div className="mt-1.5 flex gap-3">
               <button
                 className="font-bold underline underline-offset-4 transition-opacity hover:opacity-80"
