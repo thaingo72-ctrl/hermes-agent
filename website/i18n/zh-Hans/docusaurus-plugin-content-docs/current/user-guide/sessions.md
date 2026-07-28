@@ -171,7 +171,7 @@ Session ID 格式为 `YYYYMMDD_HHMMSS_<hex>`——CLI/TUI session 使用 6 位�
      Resume it on this CLI later with: /resume my-session-title
    ```
 
-6. 从此时起，对话在该平台上继续。在新线程中回复——该频道中任何已授权的用户共享同一 session，之后线程中任何真实用户消息都能无缝加入，因为线程 session 的键不含 `user_id`。
+6. 从此时起，对话在该平台上继续。在新线程中回复。由于线程 session 的键不含 `user_id`，该频道中任何已授权的用户都共享同一 session，之后的线程消息也会路由到该 session。
 
 **恢复到 CLI：** 当你想回到桌面时，只需运行 `/resume <title>`（或在 shell 中运行 `hermes -r "<title>"`），从平台停止的地方继续。
 

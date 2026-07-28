@@ -7,41 +7,13 @@
 
 
 .hero {
-  position: relative;
-  overflow: hidden;
   padding: 4rem 2rem 2.5rem;
   text-align: center;
 }
 
-.heroGlow {
-  position: absolute;
-  top: -120px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 600px;
-  height: 400px;
-  background: radial-gradient(
-    ellipse at center,
-    rgba(255, 215, 0, 0.07) 0%,
-    transparent 70%
-  );
-  pointer-events: none;
-}
-
 .heroContent {
-  position: relative;
-  z-index: 1;
   max-width: 720px;
   margin: 0 auto;
-}
-
-.heroEyebrow {
-  font-family: "JetBrains Mono", monospace;
-  font-size: 0.75rem;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  color: rgba(255, 215, 0, 0.5);
-  margin-bottom: 0.75rem;
 }
 
 .heroTitle {
@@ -311,13 +283,6 @@
   color: #ffd700;
 }
 
-.catItemIcon {
-  font-size: 0.9rem;
-  width: 1.3rem;
-  text-align: center;
-  flex-shrink: 0;
-}
-
 .catItemLabel {
   flex: 1;
   overflow: hidden;
@@ -471,18 +436,7 @@
 }
 
 .cardTop {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.6rem;
   margin-bottom: 0.5rem;
-}
-
-.cardIcon {
-  font-size: 1.15rem;
-  line-height: 1;
-  flex-shrink: 0;
-  margin-top: 0.1rem;
-  opacity: 0.7;
 }
 
 .cardTitleGroup {
@@ -506,7 +460,6 @@
 .sourcePill {
   display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
   font-family: "JetBrains Mono", monospace;
   font-size: 0.62rem;
   font-weight: 500;

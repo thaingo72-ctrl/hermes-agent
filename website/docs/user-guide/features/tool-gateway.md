@@ -1,13 +1,13 @@
 ---
 title: "Nous Tool Gateway"
-description: "One subscription, every tool. Web search, image generation, TTS, and cloud browsers — all routed through Nous Portal with no extra API keys."
+description: "Use web search, image generation, TTS, and cloud browsers through Nous Portal without configuring separate API keys."
 sidebar_label: "Tool Gateway"
 sidebar_position: 2
 ---
 
 # Nous Tool Gateway
 
-**One subscription. Every tool built in.**
+Web search, image generation, text-to-speech, and browser automation through Nous Portal.
 
 The Tool Gateway is included with every paid [Nous Portal](https://portal.nousresearch.com) subscription. It routes Hermes' tool calls — web search, image generation, text-to-speech, and cloud browser automation — through infrastructure Nous already runs, so you don't have to sign up with Firecrawl, FAL, OpenAI, Browser Use, or anyone else just to make your agent useful.
 
@@ -17,25 +17,18 @@ The Tool Gateway is included with every paid [Nous Portal](https://portal.nousre
 
 ## What's included
 
-| | Tool | What you get |
-|---|---|---|
-| 🔍 | **Web search & extract** | Agent-grade web search and full-page extraction via Firecrawl. No rate limits to worry about — the gateway handles scaling. |
-| 🎨 | **Image generation** | Nine models under one endpoint: **FLUX 2 Klein 9B**, **FLUX 2 Pro**, **Z-Image Turbo**, **Nano Banana Pro** (Gemini 3 Pro Image), **GPT Image 1.5**, **GPT Image 2**, **Ideogram V3**, **Recraft V4 Pro**, **Qwen Image**. Pick per-generation with a flag, or let Hermes default to FLUX 2 Klein. |
-| 🔊 | **Text-to-speech** | OpenAI TTS voices wired into the `text_to_speech` tool. Drop voice notes into Telegram, generate audio for pipelines, narrate anything. |
-| 🌐 | **Cloud browser automation** | Headless Chromium sessions via Browser Use. `browser_navigate`, `browser_click`, `browser_type`, `browser_vision` — all the agent-driving primitives, no Browserbase account required. |
+| Tool | What you get |
+|---|---|
+| **Web search & extract** | Agent-grade web search and full-page extraction via Firecrawl. No rate limits to worry about — the gateway handles scaling. |
+| **Image generation** | Nine models under one endpoint: **FLUX 2 Klein 9B**, **FLUX 2 Pro**, **Z-Image Turbo**, **Nano Banana Pro** (Gemini 3 Pro Image), **GPT Image 1.5**, **GPT Image 2**, **Ideogram V3**, **Recraft V4 Pro**, **Qwen Image**. Pick per-generation with a flag, or let Hermes default to FLUX 2 Klein. |
+| **Text-to-speech** | OpenAI TTS voices wired into the `text_to_speech` tool. Drop voice notes into Telegram, generate audio for pipelines, narrate anything. |
+| **Cloud browser automation** | Headless Chromium sessions via Browser Use. `browser_navigate`, `browser_click`, `browser_type`, `browser_vision` — all the agent-driving primitives, no Browserbase account required. |
 
 All four are pay-as-you-use billed against your Nous subscription. Use any combination — run the gateway for web and images while keeping your own ElevenLabs key for TTS, or route everything through Nous.
 
 ## Why it's here
 
-Building an agent that can actually *do things* means stitching together 5+ API subscriptions — each with their own signup, rate limits, billing, and quirks. The gateway collapses that into one account:
-
-- **One bill.** Pay Nous; we handle the rest.
-- **One signup.** No Firecrawl, FAL, Browser Use, or OpenAI audio accounts to manage.
-- **One key.** Your Nous Portal OAuth covers every tool.
-- **Same quality.** Same backends the direct-key route uses — just fronted by us.
-
-Bring your own keys anytime — per-tool, whenever you want to. The gateway isn't a lock-in, it's a shortcut.
+Running these tools directly can require five or more API accounts, each with separate credentials, limits, and billing. The gateway uses one Nous Portal account for authentication and billing while routing requests to the same backends as the direct-key path. You can still bring your own key for any tool.
 
 ## Get started
 

@@ -194,7 +194,7 @@ What happens:
      Resume it on this CLI later with: /resume my-session-title
    ```
 
-6. From that point, the conversation lives on the platform. Reply in the new thread — anyone authorized in that channel shares the same session, and any later real user message in the thread joins seamlessly because thread sessions key without `user_id`.
+6. From that point, the conversation lives on the platform. Reply in the new thread. Anyone authorized in that channel shares the session because thread session keys omit `user_id`, so later messages in the thread route to that same session.
 
 **Resume back to CLI:** when you want to come back to a desktop, just run `/resume <title>` (or `hermes -r "<title>"` from the shell) and pick up where the platform left off.
 

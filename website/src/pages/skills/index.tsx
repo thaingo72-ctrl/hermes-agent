@@ -59,155 +59,105 @@ function formatRelativeTime(iso?: string): string | null {
   return `${months} month${months === 1 ? "" : "s"} ago`;
 }
 
-const CATEGORY_ICONS: Record<string, string> = {
-  apple: "\u{f179}",
-  "autonomous-ai-agents": "\u{1F916}",
-  blockchain: "\u{26D3}",
-  communication: "\u{1F4AC}",
-  creative: "\u{1F3A8}",
-  "data-science": "\u{1F4CA}",
-  devops: "\u{2699}",
-  dogfood: "\u{1F436}",
-  domain: "\u{1F310}",
-  email: "\u{2709}",
-  feeds: "\u{1F4E1}",
-  gaming: "\u{1F3AE}",
-  gifs: "\u{1F3AC}",
-  github: "\u{1F4BB}",
-  health: "\u{2764}",
-  "inference-sh": "\u{26A1}",
-  leisure: "\u{2615}",
-  mcp: "\u{1F50C}",
-  media: "\u{1F3B5}",
-  migration: "\u{1F4E6}",
-  mlops: "\u{1F9EA}",
-  "note-taking": "\u{1F4DD}",
-  productivity: "\u{2705}",
-  "red-teaming": "\u{1F6E1}",
-  research: "\u{1F50D}",
-  security: "\u{1F512}",
-  "smart-home": "\u{1F3E0}",
-  "social-media": "\u{1F4F1}",
-  "software-development": "\u{1F4BB}",
-  translation: "\u{1F30D}",
-  other: "\u{1F4E6}",
-};
-
 const SOURCE_CONFIG: Record<
   string,
-  { label: string; color: string; bg: string; border: string; icon: string }
+  { label: string; color: string; bg: string; border: string }
 > = {
   "built-in": {
     label: "Built-in",
     color: "#4ade80",
     bg: "rgba(74, 222, 128, 0.08)",
     border: "rgba(74, 222, 128, 0.2)",
-    icon: "\u{2713}",
   },
   optional: {
     label: "Optional",
     color: "#fbbf24",
     bg: "rgba(251, 191, 36, 0.08)",
     border: "rgba(251, 191, 36, 0.2)",
-    icon: "\u{2B50}",
   },
   Anthropic: {
     label: "Anthropic",
     color: "#d4845a",
     bg: "rgba(212, 132, 90, 0.08)",
     border: "rgba(212, 132, 90, 0.2)",
-    icon: "\u{25C6}",
   },
   LobeHub: {
     label: "LobeHub",
     color: "#60a5fa",
     bg: "rgba(96, 165, 250, 0.08)",
     border: "rgba(96, 165, 250, 0.2)",
-    icon: "\u{25CB}",
   },
   "Claude Marketplace": {
     label: "Marketplace",
     color: "#a78bfa",
     bg: "rgba(167, 139, 250, 0.08)",
     border: "rgba(167, 139, 250, 0.2)",
-    icon: "\u{25A0}",
   },
   "skills.sh": {
     label: "skills.sh",
     color: "#34d399",
     bg: "rgba(52, 211, 153, 0.08)",
     border: "rgba(52, 211, 153, 0.2)",
-    icon: "\u{2734}",
   },
   ClawHub: {
     label: "ClawHub",
     color: "#f472b6",
     bg: "rgba(244, 114, 182, 0.08)",
     border: "rgba(244, 114, 182, 0.2)",
-    icon: "\u{2726}",
   },
   "browse.sh": {
     label: "browse.sh",
     color: "#22d3ee",
     bg: "rgba(34, 211, 238, 0.08)",
     border: "rgba(34, 211, 238, 0.2)",
-    icon: "\u{29BF}",
   },
   OpenAI: {
     label: "OpenAI",
     color: "#10b981",
     bg: "rgba(16, 185, 129, 0.08)",
     border: "rgba(16, 185, 129, 0.2)",
-    icon: "\u{2737}",
   },
   HuggingFace: {
     label: "HuggingFace",
     color: "#fbbf24",
     bg: "rgba(251, 191, 36, 0.08)",
     border: "rgba(251, 191, 36, 0.2)",
-    icon: "\u{1F917}",
   },
   NVIDIA: {
     label: "NVIDIA",
     color: "#76b900",
     bg: "rgba(118, 185, 0, 0.08)",
     border: "rgba(118, 185, 0, 0.25)",
-    icon: "\u{25B6}",
   },
   VoltAgent: {
     label: "VoltAgent",
     color: "#facc15",
     bg: "rgba(250, 204, 21, 0.08)",
     border: "rgba(250, 204, 21, 0.2)",
-    icon: "\u{26A1}",
   },
   GitHub: {
     label: "GitHub",
     color: "#94a3b8",
     bg: "rgba(148, 163, 184, 0.08)",
     border: "rgba(148, 163, 184, 0.2)",
-    icon: "\u{2756}",
   },
   "Well-Known": {
     label: "Well-Known",
     color: "#818cf8",
     bg: "rgba(129, 140, 248, 0.08)",
     border: "rgba(129, 140, 248, 0.2)",
-    icon: "\u{2756}",
   },
   gstack: {
     label: "gstack",
     color: "#fb923c",
     bg: "rgba(251, 146, 60, 0.08)",
     border: "rgba(251, 146, 60, 0.2)",
-    icon: "\u{2756}",
   },
   MiniMax: {
     label: "MiniMax",
     color: "#f87171",
     bg: "rgba(248, 113, 113, 0.08)",
     border: "rgba(248, 113, 113, 0.2)",
-    icon: "\u{2756}",
   },
 };
 
@@ -303,7 +253,6 @@ function SkillCard({
   style?: React.CSSProperties;
 }) {
   const src = SOURCE_CONFIG[skill.source] || SOURCE_CONFIG["optional"];
-  const icon = CATEGORY_ICONS[skill.category] || "\u{1F4E6}";
 
   return (
     <div
@@ -315,7 +264,6 @@ function SkillCard({
 
       <div className={styles.cardInner}>
         <div className={styles.cardTop}>
-          <span className={styles.cardIcon}>{icon}</span>
           <div className={styles.cardTitleGroup}>
             <h3 className={styles.cardTitle}>
               {highlightMatch(skill.name, query)}
@@ -328,7 +276,7 @@ function SkillCard({
                 borderColor: src.border,
               }}
             >
-              {src.icon} {src.label}
+              {src.label}
             </span>
           </div>
         </div>
@@ -646,9 +594,7 @@ export default function SkillsDashboard() {
     >
       <div className={styles.page}>
         <header className={styles.hero}>
-          <div className={styles.heroGlow} />
           <div className={styles.heroContent}>
-            <p className={styles.heroEyebrow}>Hermes Agent</p>
             <h1 className={styles.heroTitle}>Skills Hub</h1>
             <p className={styles.heroSub}>
               Discover, search, and install from{" "}
@@ -801,7 +747,6 @@ export default function SkillsDashboard() {
                   setSidebarOpen(false);
                 }}
               >
-                <span className={styles.catItemIcon}>{"\u{1F4CB}"}</span>
                 <span className={styles.catItemLabel}>All Skills</span>
                 <span className={styles.catItemCount}>{filtered.length}</span>
               </button>
@@ -811,9 +756,6 @@ export default function SkillsDashboard() {
                   className={`${styles.catItem} ${categoryFilter === cat.key ? styles.catItemActive : ""}`}
                   onClick={() => handleCategoryClick(cat.key)}
                 >
-                  <span className={styles.catItemIcon}>
-                    {CATEGORY_ICONS[cat.key] || "\u{1F4E6}"}
-                  </span>
                   <span className={styles.catItemLabel}>{cat.label}</span>
                   <span className={styles.catItemCount}>{cat.count}</span>
                 </button>
