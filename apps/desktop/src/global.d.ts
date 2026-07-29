@@ -114,16 +114,29 @@ declare global {
       notify: (payload: HermesNotification) => Promise<boolean>
       requestMicrophoneAccess: () => Promise<boolean>
       readFileDataUrl: (filePath: string) => Promise<string>
+      /** Remote non-image attach: higher dedicated cap than preview/Settings default. */
+      readFileDataUrlForAttach?: (filePath: string) => Promise<string>
+      /** Settings → Chat: max size for local files loaded as data URLs (attach/preview). */
+      dataUrlReadMax?: {
+        get: () => Promise<{ defaultMaxMb: number; maxBytes: number; maxMb: number }>
+        set: (maxMb: number) => Promise<{ defaultMaxMb: number; maxBytes: number; maxMb: number }>
+      }
       readFileText: (filePath: string) => Promise<HermesReadFileTextResult>
       selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
       writeClipboard: (text: string) => Promise<boolean>
+      readClipboard: () => Promise<string>
       saveImageFromUrl: (url: string) => Promise<boolean>
       saveImageBuffer: (data: ArrayBuffer | Uint8Array, ext: string) => Promise<string>
       saveClipboardImage: () => Promise<string>
       getPathForFile: (file: File) => string
       normalizePreviewTarget: (target: string, baseDir?: string) => Promise<HermesPreviewTarget | null>
       watchPreviewFile: (url: string) => Promise<HermesPreviewWatch>
+      /** Watch a directory for entry churn (disk-plugin door); same watcher
+       *  registry + onPreviewFileChanged channel as watchPreviewFile. Optional:
+       *  older Electron shells predate it and fall back to the readdir poll. */
+      watchDirectory?: (dir: string) => Promise<HermesPreviewWatch>
       stopPreviewFileWatch: (id: string) => Promise<boolean>
+      setActiveWork?: (payload: HermesActiveWork) => void
       setTitleBarTheme?: (payload: HermesTitleBarTheme) => void
       setNativeTheme?: (mode: 'dark' | 'light' | 'system') => void
       setTranslucency?: (payload: { intensity: number }) => void
@@ -151,6 +164,10 @@ declare global {
       revealPath?: (path: string) => Promise<boolean>
       // Open a DIRECTORY (created if missing) in the OS file manager.
       openDir?: (path: string) => Promise<{ ok: boolean; error?: string }>
+      // Local Desktop runtime-plugin root (<HERMES_HOME>/desktop-plugins),
+      // resolved by Electron independently of the connected backend (#66899).
+      // Created on demand; returns the normalized absolute path.
+      desktopPluginsRoot?: () => Promise<string>
       // Rename a file/folder in place (new base name, same parent dir).
       renamePath?: (path: string, newName: string) => Promise<{ path: string }>
       // Write a small UTF-8 text file (hardened path, parent must exist).
@@ -271,14 +288,9 @@ declare global {
       // searches that window (not the primary). `onFoundInPage` returns the
       // unsubscribe fn; the renderer wires it via `initFindInPageListener`
       // in store/find-in-page.ts and tears it down when the FindBar unmounts.
-      findInPage: (
-        query: string,
-        options?: { forward?: boolean; findNext?: boolean }
-      ) => Promise<{ count: number }>
+      findInPage: (query: string, options?: { forward?: boolean; findNext?: boolean }) => Promise<{ count: number }>
       stopFindInPage: () => Promise<void>
-      onFoundInPage: (
-        callback: (result: { activeMatchOrdinal: number; count: number }) => void
-      ) => () => void
+      onFoundInPage: (callback: (result: { activeMatchOrdinal: number; count: number }) => void) => () => void
     }
   }
 }
@@ -365,6 +377,8 @@ export interface DesktopUpdateStatus {
   error?: string
   behind?: number
   currentSha?: string
+  /** Backend only: the version string the backend reports for itself. */
+  currentVersion?: string
   targetSha?: string
   commits?: DesktopUpdateCommit[]
   dirty?: boolean
@@ -461,6 +475,12 @@ export interface HermesConnection {
 export interface HermesTitleBarTheme {
   background: string
   foreground: string
+}
+
+/** Turns in flight, so the main process can confirm before a quit kills them. */
+export interface HermesActiveWork {
+  count: number
+  titles: string[]
 }
 
 export interface HermesWindowState {

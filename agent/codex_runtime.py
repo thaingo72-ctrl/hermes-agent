@@ -241,7 +241,10 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
             try:
                 if not agent._session_db_created:
                     agent._ensure_db_session()
-                agent._session_db.update_token_counts(
+                # Enqueued for the SessionDB background writer — keeps the
+                # per-call accounting write off the turn thread (see
+                # conversation_loop's queue_token_counts call).
+                agent._session_db.queue_token_counts(
                     agent.session_id,
                     model=agent.model,
                     billing_provider=agent.provider,
@@ -321,7 +324,8 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
         try:
             if not agent._session_db_created:
                 agent._ensure_db_session()
-            agent._session_db.update_token_counts(
+            # Enqueued for the SessionDB background writer (see above).
+            agent._session_db.queue_token_counts(
                 agent.session_id,
                 input_tokens=canonical_usage.input_tokens,
                 output_tokens=canonical_usage.output_tokens,
@@ -945,11 +949,26 @@ def run_codex_app_server_turn(
         # the already-flushed user turn). See gateway/run.py agent_persisted.
         if getattr(agent, "_session_db", None) is not None:
             try:
-                agent._flush_messages_to_session_db(messages)
+                _codex_flush_ok = agent._flush_messages_to_session_db(messages)
             except Exception:
-                logger.debug(
+                _codex_flush_ok = False
+                logger.warning(
                     "codex app-server projected-message flush failed",
                     exc_info=True,
+                )
+            if _codex_flush_ok is False:
+                # Unlike the chat-completions loop (which fails closed BEFORE
+                # projection — see conversation_loop session_persistence_failed),
+                # codex output has already streamed to the user by the time this
+                # flush runs, so there is nothing left to withhold. We cannot
+                # flip agent_persisted=False either: the gateway fallback write
+                # would re-INSERT the already-flushed user turn (#860/#42039).
+                # Surface the durability gap loudly instead of a silent debug.
+                logger.warning(
+                    "codex app-server turn was delivered but could NOT be "
+                    "persisted to the session DB (session=%s) — this turn "
+                    "will be missing after restart/resume",
+                    getattr(agent, "session_id", None),
                 )
 
 
@@ -1394,6 +1413,8 @@ def run_codex_stream(
     """
     import httpx as _httpx
 
+    from agent import relay_llm
+
     if request_guard is not None:
         if client is None:
             raise ValueError("guarded Codex stream requires a request-local client")
@@ -1456,89 +1477,151 @@ def run_codex_stream(
         ):
             raise InterruptedError("Agent interrupted before Codex stream retry")
 
-        stream_kwargs = dict(api_kwargs)
-        stream_kwargs["stream"] = True
+        intercepted_events = []
+        writer_token = {"value": None}
+
+        def _open_codex_stream(next_api_kwargs: dict[str, Any]):
+            stream_kwargs = dict(next_api_kwargs)
+            stream_kwargs["stream"] = True
+            return active_client.responses.create(**stream_kwargs)
+
+        def _codex_stream_created(_raw_stream: Any) -> None:
+            # Claim the delta sink for THIS physical attempt. A newer attempt
+            # supersedes this token and fences late deltas out of the turn.
+            writer_token["value"] = claim_stream_writer(agent)
+
+        def _accept_codex_chunk(_chunk: Any) -> bool:
+            token = writer_token["value"]
+            if token is None or stream_writer_is_current(agent, token):
+                return True
+            logger.warning(
+                "Codex streaming attempt superseded by a newer stream; "
+                "stopping consumption to preserve the single-writer "
+                "invariant (model=%s).",
+                api_kwargs.get("model", "unknown"),
+            )
+            return False
+
+        def _finalize_codex_stream() -> Any:
+            return _consume_codex_event_stream(
+                list(intercepted_events),
+                model=api_kwargs.get("model"),
+            )
 
         try:
-            event_stream = active_client.responses.create(**stream_kwargs)
-        except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
+            event_stream = relay_llm.stream(
+                dict(api_kwargs),
+                _open_codex_stream,
+                session_id=str(getattr(agent, "session_id", "") or ""),
+                name=str(getattr(agent, "provider", "") or "codex"),
+                model_name=str(api_kwargs.get("model") or ""),
+                finalizer=_finalize_codex_stream,
+                on_stream_created=_codex_stream_created,
+                on_chunk=intercepted_events.append,
+                chunk_adapter=lambda chunk: chunk,
+                accept_chunk=_accept_codex_chunk,
+                completed_response_predicate=lambda response: bool(
+                    hasattr(response, "output") and not hasattr(response, "__iter__")
+                ),
+                metadata={
+                    "api_mode": "codex_responses",
+                    "api_request_id": getattr(agent, "_current_api_request_id", None),
+                    "call_role": (
+                        "delegated"
+                        if getattr(agent, "is_subagent", False)
+                        else "fallback"
+                        if int(getattr(agent, "_fallback_index", 0) or 0) > 0
+                        else "primary"
+                    ),
+                    "retry_count": attempt,
+                },
+                defer_logical_completion=True,
+            )
+        except (
+            _httpx.RemoteProtocolError,
+            _httpx.ReadTimeout,
+            _httpx.ConnectError,
+            ConnectionError,
+        ) as exc:
             if attempt < max_stream_retries:
                 logger.debug(
-                    "Codex Responses stream connect failed (attempt %s/%s); retrying. %s error=%s",
-                    attempt + 1, max_stream_retries + 1,
-                    agent._client_log_context(), exc,
+                    "Codex Responses stream connect failed (attempt %s/%s); "
+                    "retrying. %s error=%s",
+                    attempt + 1,
+                    max_stream_retries + 1,
+                    agent._client_log_context(),
+                    exc,
                 )
                 continue
             raise
 
-        # Claim the delta sink for THIS attempt (#65991) — parity with the
-        # chat_completions/anthropic/bedrock paths. If a prior attempt's
-        # stream is somehow still alive, this claim supersedes it so its
-        # late deltas are fenced out of the turn; conversely, a newer
-        # attempt supersedes us and the interrupt_check below stops our
-        # consumption immediately.
-        _writer_token = claim_stream_writer(agent)
-
-        def _interrupt_or_superseded(_tok=_writer_token) -> bool:
+        def _interrupt_or_superseded() -> bool:
             if agent._interrupt_requested:
                 return True
             if request_guard is not None and not request_guard.is_active():
-                return True
-            if not stream_writer_is_current(agent, _tok):
-                logger.warning(
-                    "Codex streaming attempt superseded by a newer stream; "
-                    "stopping consumption to preserve the single-writer "
-                    "invariant (model=%s).",
-                    api_kwargs.get("model", "unknown"),
-                )
                 return True
             return False
 
         response_to_finish = None
         try:
-            # Compatibility: some mocks/providers return a concrete response
-            # instead of an iterable.  Pass it straight through.
-            if hasattr(event_stream, "output") and not hasattr(event_stream, "__iter__"):
-                response_to_finish = event_stream
-            else:
-                try:
-                    final = _consume_codex_event_stream(
-                        event_stream,
-                        model=str(api_kwargs.get("model") or ""),
-                        on_text_delta=_on_text_delta,
-                        on_reasoning_delta=_on_reasoning_delta,
-                        on_commentary_message=(
-                            _on_commentary_message
-                            if (
-                                getattr(agent, "interim_assistant_callback", None) is not None
-                                and getattr(agent, "show_commentary", True)
-                            )
-                            else None
-                        ),
-                        on_first_delta=_on_first_delta,
-                        on_event=_on_event,
-                        interrupt_check=_interrupt_or_superseded,
-                    )
-                except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
-                    if attempt < max_stream_retries:
-                        logger.debug(
-                            "Codex Responses stream transport failed mid-iteration "
-                            "(attempt %s/%s); retrying. %s error=%s",
-                            attempt + 1, max_stream_retries + 1,
-                            agent._client_log_context(), exc,
+            try:
+                final = _consume_codex_event_stream(
+                    event_stream,
+                    model=str(api_kwargs.get("model") or ""),
+                    on_text_delta=_on_text_delta,
+                    on_reasoning_delta=_on_reasoning_delta,
+                    on_commentary_message=(
+                        _on_commentary_message
+                        if (
+                            getattr(agent, "interim_assistant_callback", None) is not None
+                            and getattr(agent, "show_commentary", True)
                         )
-                        continue
+                        else None
+                    ),
+                    on_first_delta=_on_first_delta,
+                    on_event=_on_event,
+                    interrupt_check=_interrupt_or_superseded,
+                )
+                # The terminal SSE frame is contractually last. Request the
+                # end-of-stream marker so Relay can finalize the physical
+                # attempt before Hermes returns. Do not drain an obsolete
+                # guarded request after its watchdog has claimed cancellation.
+                if not _interrupt_or_superseded():
+                    for _ignored in event_stream:
+                        pass
+            except (
+                _httpx.RemoteProtocolError,
+                _httpx.ReadTimeout,
+                _httpx.ConnectError,
+                ConnectionError,
+            ) as exc:
+                if attempt < max_stream_retries:
+                    logger.debug(
+                        "Codex Responses stream transport failed mid-iteration "
+                        "(attempt %s/%s); retrying. %s error=%s",
+                        attempt + 1,
+                        max_stream_retries + 1,
+                        agent._client_log_context(),
+                        exc,
+                    )
+                    continue
+                raise
+            except RuntimeError:
+                if event_stream.final_response is not None:
+                    response_to_finish = event_stream.final_response
+                else:
                     raise
-
+            else:
                 if final.status in {"incomplete", "failed"}:
                     logger.warning(
                         "Codex Responses stream terminal status=%s "
                         "(incomplete_details=%s, error=%s, streamed_chars=%d). %s",
-                        final.status, final.incomplete_details, final.error,
+                        final.status,
+                        final.incomplete_details,
+                        final.error,
                         sum(len(p) for p in streamed_text_parts),
                         agent._client_log_context(),
                     )
-
                 response_to_finish = final
         finally:
             close_fn = getattr(event_stream, "close", None)
@@ -1546,7 +1629,13 @@ def run_codex_stream(
                 try:
                     close_fn()
                 except Exception:
-                    pass
+                    # A failed close can leave this response's connection
+                    # checked out of the httpx pool. Poison request-local
+                    # clients so the caller cannot cache a leaked connection.
+                    if client is not None:
+                        agent._abort_request_openai_client(
+                            active_client, reason="codex_stream_close_failed"
+                        )
         return _finish_response(response_to_finish)
 
 
