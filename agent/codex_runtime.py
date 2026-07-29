@@ -116,6 +116,13 @@ class CodexRequestGuard:
             self._last_event_ts = time.time() if timestamp is None else timestamp
             return True
 
+    def claim_stream_writer_if_active(self, agent: Any) -> int | None:
+        """Atomically fence cancellation against the physical writer claim."""
+        with self._lock:
+            if self._state != "active":
+                return None
+            return claim_stream_writer(agent)
+
     def last_event_ts(self) -> float | None:
         with self._lock:
             return self._last_event_ts
@@ -1478,17 +1485,42 @@ def run_codex_stream(
             raise InterruptedError("Agent interrupted before Codex stream retry")
 
         intercepted_events = []
-        writer_token = {"value": None}
+        writer_token: dict[str, int | None] = {"value": None}
+
+        def _close_obsolete_stream(raw_stream: Any) -> None:
+            close_fn = getattr(raw_stream, "close", None)
+            if not callable(close_fn):
+                return
+            try:
+                close_fn()
+            except Exception:
+                if client is not None:
+                    agent._abort_request_openai_client(
+                        active_client,
+                        reason="codex_obsolete_stream_close_failed",
+                    )
 
         def _open_codex_stream(next_api_kwargs: dict[str, Any]):
+            if request_guard is not None and not request_guard.is_active():
+                raise InterruptedError("Codex request attempt is obsolete before stream open")
             stream_kwargs = dict(next_api_kwargs)
             stream_kwargs["stream"] = True
-            return active_client.responses.create(**stream_kwargs)
-
-        def _codex_stream_created(_raw_stream: Any) -> None:
+            raw_stream = active_client.responses.create(**stream_kwargs)
             # Claim the delta sink for THIS physical attempt. A newer attempt
-            # supersedes this token and fences late deltas out of the turn.
-            writer_token["value"] = claim_stream_writer(agent)
+            # supersedes this token and fences late deltas out of the turn. The
+            # guarded claim happens before the stream escapes to Relay, making
+            # cancellation vs writer ownership one atomic ordering decision.
+            if request_guard is not None:
+                token = request_guard.claim_stream_writer_if_active(agent)
+                if token is None:
+                    _close_obsolete_stream(raw_stream)
+                    raise InterruptedError(
+                        "Codex request attempt became obsolete during stream open"
+                    )
+            else:
+                token = claim_stream_writer(agent)
+            writer_token["value"] = token
+            return raw_stream
 
         def _accept_codex_chunk(_chunk: Any) -> bool:
             token = writer_token["value"]
@@ -1516,7 +1548,6 @@ def run_codex_stream(
                 name=str(getattr(agent, "provider", "") or "codex"),
                 model_name=str(api_kwargs.get("model") or ""),
                 finalizer=_finalize_codex_stream,
-                on_stream_created=_codex_stream_created,
                 on_chunk=intercepted_events.append,
                 chunk_adapter=lambda chunk: chunk,
                 accept_chunk=_accept_codex_chunk,

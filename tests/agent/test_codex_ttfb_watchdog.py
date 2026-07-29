@@ -109,6 +109,96 @@ def test_inactive_request_guard_blocks_delayed_worker_entry():
     assert creates == []
 
 
+def test_guard_deactivated_during_stream_open_closes_without_claiming_writer(monkeypatch):
+    """A stream that returns after its watchdog timed out must not supersede the
+    writer already owned by the newer retry, and its raw stream must be closed.
+    """
+    from agent import codex_runtime as runtime
+
+    guard = runtime.CodexRequestGuard()
+    closed: list[bool] = []
+
+    class RawStream:
+        def __iter__(self):
+            return iter(())
+
+        def close(self):
+            closed.append(True)
+
+    raw_stream = RawStream()
+    claimed: list[object] = []
+
+    def delayed_create(**_kwargs):
+        guard.deactivate()
+        return raw_stream
+
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=delayed_create)
+    )
+    monkeypatch.setattr(
+        runtime,
+        "claim_stream_writer",
+        lambda _agent: claimed.append(object()) or claimed[-1],
+    )
+
+    with pytest.raises(InterruptedError, match="obsolete"):
+        runtime.run_codex_stream(
+            _guard_test_agent(),
+            {"model": "gpt-5.6-sol"},
+            client=client,
+            request_guard=guard,
+        )
+
+    assert claimed == []
+    assert closed == [True]
+
+
+def test_guarded_writer_claim_happens_before_stream_factory_returns(monkeypatch):
+    """A physical stream cannot escape to Relay before its guarded writer claim
+    is linearized; a later cancellation is then superseded by the next token.
+    """
+    from agent import codex_runtime as runtime
+    from agent import relay_llm
+
+    guard = runtime.CodexRequestGuard()
+    closed: list[bool] = []
+
+    class RawStream:
+        def close(self):
+            closed.append(True)
+
+    raw_stream = RawStream()
+    claimed: list[object] = []
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=lambda **_kwargs: raw_stream)
+    )
+
+    def race_stream(request, stream_factory, **_kwargs):
+        opened = stream_factory(request)
+        assert len(claimed) == 1
+        guard.deactivate()
+        opened.close()
+        raise InterruptedError("obsolete after guarded writer claim")
+
+    monkeypatch.setattr(relay_llm, "stream", race_stream)
+    monkeypatch.setattr(
+        runtime,
+        "claim_stream_writer",
+        lambda _agent: claimed.append(object()) or claimed[-1],
+    )
+
+    with pytest.raises(InterruptedError, match="obsolete"):
+        runtime.run_codex_stream(
+            _guard_test_agent(),
+            {"model": "gpt-5.6-sol"},
+            client=client,
+            request_guard=guard,
+        )
+
+    assert len(claimed) == 1
+    assert closed == [True]
+
+
 def test_deactivated_request_guard_suppresses_late_callbacks(monkeypatch):
     """Once a timeout deactivates the request, late events cannot mutate shared
     stream state or emit text/reasoning/first-delta callbacks."""
