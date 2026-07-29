@@ -879,6 +879,21 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         # (malicious 2.4.6 release on 2026-05-12). Restore once available.
         "options": ["local", "groq", "openai", "xai", "elevenlabs"],
     },
+    "stt.local.model": {
+        "type": "select",
+        "description": "Local faster-whisper model size",
+        "options": ["tiny", "base", "small", "medium", "large-v3"],
+    },
+    "stt.groq.model": {
+        "type": "select",
+        "description": "Groq Whisper model",
+        "options": ["whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"],
+    },
+    "stt.openai.model": {
+        "type": "select",
+        "description": "OpenAI transcription model",
+        "options": ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"],
+    },
     "stt.elevenlabs.model_id": {
         "type": "select",
         "description": "ElevenLabs Scribe model",
@@ -15947,6 +15962,7 @@ async def update_skill_content(body: SkillContentUpdate):
 @app.get("/api/tools/toolsets")
 async def get_toolsets(profile: Optional[str] = None):
     from hermes_cli.tools_config import (
+        _CONFIG_ONLY_TOOLSETS,
         _get_effective_configurable_toolsets,
         _get_platform_tools,
         _toolset_configuration_platform,
@@ -15977,7 +15993,16 @@ async def get_toolsets(profile: Optional[str] = None):
         except Exception:
             tools = []
         target_platform = _toolset_configuration_platform(name)
-        is_enabled = name in enabled_by_platform[target_platform]
+        if name in _CONFIG_ONLY_TOOLSETS:
+            # Config-only capabilities (stt) have no per-platform toolset —
+            # their switch is their own config section (e.g. stt.enabled).
+            from utils import is_truthy_value
+
+            section = config.get(name)
+            section = section if isinstance(section, dict) else {}
+            is_enabled = is_truthy_value(section.get("enabled", True), default=True)
+        else:
+            is_enabled = name in enabled_by_platform[target_platform]
         result.append({
             "name": name,
             "label": gui_toolset_label(label),
@@ -16010,6 +16035,7 @@ async def toggle_toolset(name: str, body: ToolsetToggle, profile: Optional[str] 
     to ``body.profile`` when provided. Returns 400 for unknown toolset keys.
     """
     from hermes_cli.tools_config import (
+        _CONFIG_ONLY_TOOLSETS,
         _get_effective_configurable_toolsets,
         _get_platform_tools,
         _save_platform_tools,
@@ -16021,6 +16047,23 @@ async def toggle_toolset(name: str, body: ToolsetToggle, profile: Optional[str] 
         raise HTTPException(status_code=400, detail=f"Unknown toolset: {name}")
 
     target_platform = _toolset_configuration_platform(name)
+    if name in _CONFIG_ONLY_TOOLSETS:
+        # Config-only capabilities (stt) toggle their own config section's
+        # ``enabled`` flag — there is no platform_toolsets entry to write.
+        with _profile_scope(body.profile or profile):
+            config = load_config()
+            section = config.setdefault(name, {})
+            if not isinstance(section, dict):
+                section = {}
+                config[name] = section
+            section["enabled"] = bool(body.enabled)
+            save_config(config)
+        return {
+            "ok": True,
+            "name": name,
+            "platform": target_platform,
+            "enabled": body.enabled,
+        }
     with _profile_scope(body.profile or profile):
         config = load_config()
         enabled = set(
