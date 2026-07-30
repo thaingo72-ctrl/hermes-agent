@@ -405,6 +405,12 @@ def test_stale_env_does_not_block_execute_code_in_gateway_session(monkeypatch):
     monkeypatch.setattr(approval_mod, "_get_cron_approval_mode", lambda: "deny")
     monkeypatch.setattr(approval_mod, "_get_approval_mode", lambda: "manual")
     monkeypatch.setattr(approval_mod, "_YOLO_MODE_FROZEN", False)
+    # Keep the assertion independent of a developer's persistent/session
+    # approval allowlist when this file is run outside the canonical sandbox.
+    monkeypatch.setattr(approval_mod, "is_approved", lambda *_args: False)
+    monkeypatch.setattr(
+        approval_mod, "is_current_session_yolo_enabled", lambda: False
+    )
 
     # Gateway binds an interactive session (e.g. Feishu reply)
     tokens = set_session_vars(platform="feishu", chat_id="c1", chat_name="Chat")
