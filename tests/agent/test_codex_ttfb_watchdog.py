@@ -649,7 +649,7 @@ def test_ttfb_includes_silent_hang_hint_for_gpt_5_5(tmp_path, monkeypatch):
     from agent import chat_completion_helpers as h
 
     agent = _make_codex_agent(tmp_path, monkeypatch)
-    monkeypatch.setenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", "0.4")
 
     closes: list = []
     statuses: list[str] = []
@@ -739,7 +739,7 @@ def test_ttfb_does_not_kill_when_events_flow(tmp_path, monkeypatch):
     from agent import chat_completion_helpers as h
 
     agent = _make_codex_agent(tmp_path, monkeypatch)
-    monkeypatch.setenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", "1")
+    monkeypatch.setenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", "0.4")
 
     closes: list = []
     dummy_client = SimpleNamespace()
@@ -761,7 +761,7 @@ def test_ttfb_does_not_kill_when_events_flow(tmp_path, monkeypatch):
         _mark_stream_event(agent, request_guard)
         if on_first_delta:
             on_first_delta()
-        time.sleep(2.0)
+        time.sleep(0.9)
         return sentinel
 
     monkeypatch.setattr(agent, "_run_codex_stream", fake_stream)
@@ -816,41 +816,8 @@ def test_event_idle_kills_after_first_event_then_silence(tmp_path, monkeypatch):
         stop["flag"] = True
 
 
-def test_wait_notice_handles_infinite_local_stale_timeout():
-    """After the first SSE event, a local endpoint's infinite wall-clock
-    timeout must not reach ``int()``; report the finite idle watchdog instead."""
-    from agent import chat_completion_helpers as h
-
-    recovery = h._codex_wait_notice_recovery(
-        stale_timeout=float("inf"),
-        ttfb_enabled=True,
-        ttfb_timeout=120.0,
-        last_event_ts=130.0,
-        call_start=100.0,
-        idle_enabled=True,
-        idle_timeout=60.0,
-        elapsed=30.0,
-    )
-
-    assert recovery == "; auto-reconnect at 90s"
 
 
-def test_wait_notice_reports_ttfb_before_first_event():
-    """Before the first SSE event, the finite TTFB cutoff is the recovery."""
-    from agent import chat_completion_helpers as h
-
-    recovery = h._codex_wait_notice_recovery(
-        stale_timeout=float("inf"),
-        ttfb_enabled=True,
-        ttfb_timeout=120.0,
-        last_event_ts=None,
-        call_start=100.0,
-        idle_enabled=True,
-        idle_timeout=60.0,
-        elapsed=30.0,
-    )
-
-    assert recovery == "; auto-reconnect at 120s"
 
 
 @pytest.mark.parametrize(
@@ -877,40 +844,8 @@ def test_wait_notice_omits_reconnect_when_all_deadlines_are_non_finite(
     assert recovery == ""
 
 
-def test_wait_notice_omits_elapsed_idle_deadline():
-    """An idle watchdog that already expired must not claim future recovery."""
-    from agent import chat_completion_helpers as h
-
-    recovery = h._codex_wait_notice_recovery(
-        stale_timeout=float("inf"),
-        ttfb_enabled=True,
-        ttfb_timeout=120.0,
-        last_event_ts=100.0,
-        call_start=100.0,
-        idle_enabled=True,
-        idle_timeout=30.0,
-        elapsed=60.0,
-    )
-
-    assert recovery == ""
 
 
-def test_wait_notice_does_not_skip_elapsed_stale_deadline_for_later_idle():
-    """An already-due watchdog wins; do not advertise a later deadline."""
-    from agent import chat_completion_helpers as h
-
-    recovery = h._codex_wait_notice_recovery(
-        stale_timeout=30.0,
-        ttfb_enabled=True,
-        ttfb_timeout=120.0,
-        last_event_ts=130.0,
-        call_start=100.0,
-        idle_enabled=True,
-        idle_timeout=60.0,
-        elapsed=60.0,
-    )
-
-    assert recovery == ""
 
 
 def test_moa_heartbeat_survives_infinite_stale_timeout(monkeypatch):

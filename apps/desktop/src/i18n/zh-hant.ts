@@ -150,6 +150,7 @@ export const zhHant = defineLocale({
       noSpeechDetected: '未偵測到語音',
       playbackFailed: '語音播放失敗',
       recordingFailed: '語音錄製失敗',
+      sayStopToEnd: phrase => `說「${phrase}」即可結束語音對話。`,
       transcriptionFailed: '語音轉寫失敗',
       transcriptionUnavailable: '語音轉寫暫不可用。',
       tryRecordingAgain: '請再錄製一次。',
@@ -2520,6 +2521,7 @@ export const zhHant = defineLocale({
       statusError: '錯誤',
       statusRecovered: '已復原',
       statusDone: '完成',
+      memoryWriteNoted: '已記下記憶寫入',
       actions: {
         read: '已讀取',
         reading: '正在讀取',

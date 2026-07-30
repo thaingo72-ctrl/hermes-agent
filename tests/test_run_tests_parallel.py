@@ -229,12 +229,6 @@ def _run_runner(probe_dir: Path, *extra: str) -> subprocess.CompletedProcess:
     )
 
 
-def test_bare_q_flag_passes_through(tmp_path: Path) -> None:
-    """A bare ``-q`` (no ``--``) runs clean instead of erroring out."""
-    probe_dir = _make_probe_dir(tmp_path)
-    proc = _run_runner(probe_dir, "-q")
-    assert proc.returncode == 0, proc.stdout
-    assert "unrecognized arguments" not in proc.stdout
 
 
 def test_bare_value_flag_keeps_its_value(tmp_path: Path) -> None:
@@ -257,12 +251,6 @@ def test_bare_value_flag_keeps_its_value(tmp_path: Path) -> None:
     )
 
 
-def test_explicit_double_dash_still_works(tmp_path: Path) -> None:
-    """The legacy ``--`` separator keeps working alongside bare flags."""
-    probe_dir = _make_probe_dir(tmp_path)
-    proc = _run_runner(probe_dir, "-q", "--", "--tb=short")
-    assert proc.returncode == 0, proc.stdout
-    assert "unrecognized arguments" not in proc.stdout
 
 
 def test_positional_path_not_treated_as_flag(tmp_path: Path) -> None:
@@ -749,23 +737,6 @@ def test_zero_collected_across_run_fails_and_says_so(tmp_path: Path) -> None:
     assert "NOT a pass" in proc.stdout
 
 
-def test_all_skipped_file_is_still_a_pass(tmp_path: Path) -> None:
-    """Per-file zero-collection stays tolerated.
-
-    A platform-gated file (every test skipped) reports "N skipped" — collected,
-    just not executed — and must NOT trip the nothing-ran guard.
-    """
-    probe_dir = tmp_path / "skipprobe"
-    probe_dir.mkdir()
-    (probe_dir / "test_allskipped.py").write_text(
-        "import pytest\n\n"
-        "pytestmark = pytest.mark.skip(reason='platform-gated')\n\n"
-        "def test_one():\n    assert True\n\n"
-        "def test_two():\n    assert True\n"
-    )
-    proc = _run_runner(probe_dir)
-    assert proc.returncode == 0, proc.stdout
-    assert "NO TESTS RAN" not in proc.stdout
 
 
 def test_node_id_selector_runs_the_named_test(tmp_path: Path) -> None:

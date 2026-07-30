@@ -151,6 +151,7 @@ docs/superpowers/*
 # — ignore so `git status` stays clean and update's autostash skips them.
 .update-incomplete
 .update-incomplete.lock
+.lazy-refresh-incomplete
 
 # Checkout fingerprint the __pycache__ tree was last validated against
 # (launch-time stale-bytecode sweep). Runtime state, never a code change.
