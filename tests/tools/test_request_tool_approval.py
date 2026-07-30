@@ -111,7 +111,7 @@ class TestRequestToolApproval:
 
     def test_no_human_non_cron_fails_closed(self, monkeypatch):
         """Non-interactive, non-gateway, NON-cron context blocks (fail-closed)
-        — a plugin-flagged action never runs ungated without a human."""
+        so a plugin-flagged action never runs ungated without a human."""
         monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
         monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
         monkeypatch.setattr(approval, "_is_cron_approval_context", lambda: False)
