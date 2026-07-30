@@ -397,11 +397,11 @@ def _cwd_marker(session_id: str) -> str:
 # set), not Hermes' per-turn session identity.
 #
 # Kept in sync with gateway.session_context._VAR_MAP: every bridged name starts
-# with one of these prefixes (or is HERMES_UI_SESSION_ID). Used by unit tests
+# with one of these prefixes or is one of the exact marker names. Used by unit tests
 # as the Python-side contract for the exclusion set; the dump path unsets by
 # name/prefix instead of grepping declare lines (see below / issue #71296).
 _SNAPSHOT_EXCLUDED_ENV_REGEX = (
-    "^declare -x (HERMES_SESSION_|HERMES_UI_SESSION_ID|HERMES_CRON_AUTO_DELIVER_)"
+    "^declare -x (HERMES_SESSION_|HERMES_UI_SESSION_ID|HERMES_CRON_SESSION|HERMES_CRON_AUTO_DELIVER_)"
 )
 
 
@@ -431,7 +431,7 @@ def _export_dump_excluding_session_vars(tmp_path: str) -> str:
     return (
         "{ ( "
         "unset ${!HERMES_SESSION_*} ${!HERMES_CRON_AUTO_DELIVER_*} "
-        "HERMES_UI_SESSION_ID 2>/dev/null; "
+        "HERMES_UI_SESSION_ID HERMES_CRON_SESSION 2>/dev/null; "
         "export -p; "
         ") || true; } "
         f"> {tmp_path}"
