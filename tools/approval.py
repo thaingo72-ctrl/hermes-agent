@@ -2929,21 +2929,32 @@ def _run_approval_gate(
         except Exception:
             approval_callback = None
 
+    # A per-job cron marker is authoritative over process-wide gateway/CLI
+    # flags. The gateway hosts cron jobs in-process while exporting
+    # HERMES_INTERACTIVE/HERMES_EXEC_ASK for user sessions; checking those
+    # first would route an unattended cron job into a human prompt with no
+    # listener instead of respecting approvals.cron_mode.
+    if _is_cron_session():
+        if _get_cron_approval_mode() == "deny":
+            return {
+                "approved": False,
+                "message": cron_deny_message,
+                "pattern_key": pattern_key,
+                "description": description,
+            }
+        logger.warning(
+            "%s (pattern: %s): %s — AUTO-APPROVED by approvals.cron_mode.",
+            autoapprove_log_prefix,
+            pattern_key,
+            description,
+        )
+        return {"approved": True, "message": None}
+
     is_cli = _is_interactive_cli()
     is_gateway = _is_gateway_approval_context()
 
     if not is_cli and not is_gateway:
-        # Cron sessions: respect cron_mode config
-        if _is_cron_session():
-            if _get_cron_approval_mode() == "deny":
-                return {
-                    "approved": False,
-                    "message": cron_deny_message,
-                    "pattern_key": pattern_key,
-                    "description": description,
-                }
-            # cron_mode: approve — fall through to auto-approve below.
-        elif fail_closed_when_no_human:
+        if fail_closed_when_no_human:
             # Non-cron, non-interactive, no gateway: no human can answer.
             # The plugin-escalation path opts in to fail-closed here so a
             # plugin-flagged action never runs ungated. (The dangerous-
