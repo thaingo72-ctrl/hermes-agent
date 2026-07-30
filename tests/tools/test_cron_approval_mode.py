@@ -8,6 +8,7 @@ from tools.approval import (
     check_all_command_guards,
     check_dangerous_command,
     detect_dangerous_command,
+    request_tool_approval,
 )
 
 
@@ -348,6 +349,58 @@ class TestCronModeInteractions:
             # hardline-blocked regardless of yolo (see test_hardline_blocklist.py).
             result = check_dangerous_command("rm -rf /tmp/stuff", "local")
             assert result["approved"]
+
+    def test_cron_context_overrides_process_interactive_flags_for_command_gate(
+        self, monkeypatch
+    ):
+        """Gateway-wide env flags must not turn an in-process cron into a prompt."""
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        monkeypatch.setenv("HERMES_EXEC_ASK", "1")
+        monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
+
+        from gateway.session_context import _VAR_MAP
+        from unittest.mock import patch as mock_patch
+
+        token = _VAR_MAP["HERMES_CRON_SESSION"].set("1")
+        try:
+            with mock_patch(
+                "tools.approval._get_cron_approval_mode", return_value="deny"
+            ):
+                result = check_dangerous_command("rm -rf /tmp/stuff", "local")
+        finally:
+            _VAR_MAP["HERMES_CRON_SESSION"].reset(token)
+
+        assert not result["approved"]
+        assert "cron_mode" in result["message"]
+        assert result.get("status") != "approval_required"
+
+    def test_cron_context_overrides_process_interactive_flags_for_plugin_gate(
+        self, monkeypatch
+    ):
+        """Plugin approvals inside cron obey cron_mode even in the gateway process."""
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+        monkeypatch.setenv("HERMES_EXEC_ASK", "1")
+        monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
+
+        from gateway.session_context import _VAR_MAP
+        from unittest.mock import patch as mock_patch
+
+        token = _VAR_MAP["HERMES_CRON_SESSION"].set("1")
+        try:
+            with mock_patch(
+                "tools.approval._get_cron_approval_mode", return_value="deny"
+            ):
+                result = request_tool_approval(
+                    "terminal", "smtp send", rule_key="probe"
+                )
+        finally:
+            _VAR_MAP["HERMES_CRON_SESSION"].reset(token)
+
+        assert not result["approved"]
+        assert "cron_mode" in result["message"]
+        assert result.get("status") != "approval_required"
 
     def test_non_cron_non_interactive_still_auto_approves(self, monkeypatch):
         """Non-cron, non-interactive sessions (e.g. scripted usage) still auto-approve."""
