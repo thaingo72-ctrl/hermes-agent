@@ -40,15 +40,18 @@ Exit code: 0 if every file's pytest exited 0; 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 # Default test discovery roots.
@@ -98,6 +101,148 @@ _DEFAULT_FILE_RETRIES = 1
 # wall-clock seconds. Used by ``--slice`` to distribute files across
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
+
+
+# Win32 Job Object definitions.  Keep these available on every platform so
+# the containment contract can be unit-tested without a Windows host.
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+
+
+class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", ctypes.c_uint32),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", ctypes.c_uint32),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", ctypes.c_uint32),
+        ("SchedulingClass", ctypes.c_uint32),
+    ]
+
+
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", _IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+def _windows_last_error() -> int:
+    get_last_error = getattr(ctypes, "get_last_error", lambda: 0)
+    return int(get_last_error())
+
+
+def _windows_api_error(action: str, error_code: int | None = None) -> OSError:
+    if error_code is None:
+        error_code = _windows_last_error()
+    return OSError(error_code, f"Windows {action} failed")
+
+
+class _WindowsJob:
+    """A Win32 Job Object configured to hard-kill members on close."""
+
+    def __init__(self, api: Any, handle: Any) -> None:
+        self.api = api
+        self.handle = handle
+
+    @classmethod
+    def create(cls, api: Any | None = None) -> "_WindowsJob":
+        if api is None:
+            loader = getattr(ctypes, "WinDLL", None)
+            if loader is None:  # pragma: no cover - only reachable off Windows
+                raise OSError("Win32 APIs are unavailable")
+            api = loader("kernel32", use_last_error=True)
+            assert api is not None
+            api.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+            api.CreateJobObjectW.restype = ctypes.c_void_p
+            api.SetInformationJobObject.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+            ]
+            api.SetInformationJobObject.restype = ctypes.c_int
+            api.CloseHandle.argtypes = [ctypes.c_void_p]
+            api.CloseHandle.restype = ctypes.c_int
+            api.AssignProcessToJobObject.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            api.AssignProcessToJobObject.restype = ctypes.c_int
+            api.GetCurrentProcess.argtypes = []
+            api.GetCurrentProcess.restype = ctypes.c_void_p
+
+        assert api is not None
+        handle = api.CreateJobObjectW(None, None)
+        if not handle:
+            raise _windows_api_error("CreateJobObjectW")
+
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = (
+            _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        )
+        configured = api.SetInformationJobObject(
+            handle,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not configured:
+            error_code = _windows_last_error()
+            api.CloseHandle(handle)
+            raise _windows_api_error("SetInformationJobObject", error_code)
+        return cls(api, handle)
+
+    def assign_current_process(self) -> None:
+        """Contain this runner so all subsequently spawned children inherit."""
+        process_handle = self.api.GetCurrentProcess()
+        if not self.api.AssignProcessToJobObject(self.handle, process_handle):
+            raise _windows_api_error("AssignProcessToJobObject(current process)")
+
+    def close(self) -> None:
+        if self.handle is None:
+            return
+        handle = self.handle
+        self.handle = None
+        if not self.api.CloseHandle(handle):
+            raise _windows_api_error("CloseHandle(job)")
+
+
+def _create_windows_runner_job(
+    job_factory: Any = _WindowsJob.create,
+) -> _WindowsJob | Any:
+    """Put the runner in a KILL_ON_JOB_CLOSE Job before it spawns tests.
+
+    The Job handle is intentionally kept open until process exit. Because the
+    handle is non-inheritable, Windows closes the last handle even when the
+    runner is hard-killed with TerminateProcess; every pytest descendant that
+    inherited Job membership is then terminated by the kernel.
+    """
+    job = job_factory()
+    try:
+        job.assign_current_process()
+    except BaseException:
+        job.close()
+        raise
+    return job
 
 
 def _approximately_count_tests(
@@ -170,39 +315,27 @@ def _discover_files(roots: List[Path]) -> List[Path]:
     return sorted(out)
 
 
-def _kill_tree(proc: "subprocess.Popen", pgid: int | None = None) -> None:
+def _kill_tree(
+    proc: Any,
+    pgid: int | None = None,
+) -> None:
     """Kill the pytest subprocess and every descendant it spawned.
 
-    A test run can spin up uvicorn servers, async runtimes, or other
-    long-running grandchildren that survive the pytest subprocess exit
-    if we don't kill the whole tree. ``subprocess.Popen.kill()`` only
-    targets the immediate child; grandchildren reparent to PID 1
-    (Linux) / get adopted by services.exe (Windows) and leak.
+    POSIX process-group SIGKILL targets the pgid captured immediately after
+    ``Popen``; this still reaches descendants after the pytest leader exits.
 
-    POSIX: the caller must pass ``pgid`` — the process group id captured
-    immediately after Popen (via ``os.getpgid(proc.pid)``). We can't
-    look it up here in the happy path because by the time we get
-    called the leader process has already been reaped and its pid is
-    gone from the kernel's process table, even though descendants in
-    the group are still alive. SIGKILL'ing the captured pgid takes out
-    everything in that group atomically.
-
-    Windows: ``taskkill /F /T /PID`` walks the recorded ppid chain and
-    terminates the whole tree, even when the root has already exited.
-
-    Why not psutil: psutil walks the parent-child tree, but in the
-    happy path the root has already been reaped so ``psutil.Process(pid)``
-    can't find it; grandchildren reparented to PID 1 are also
-    unreachable by tree walk at that point. The platform-native
-    primitives (process groups / taskkill) handle both cases correctly
-    without an extra abstraction layer.
+    On Windows, ``taskkill /F /T`` handles per-file timeout and ordinary
+    cleanup. Independently, the runner joins a Windows Job Object configured
+    for hard termination with ``KILL_ON_JOB_CLOSE`` before spawning tests.
+    With ``TerminateProcess``, Python SIGTERM handlers do not run. Windows
+    instead closes the runner's non-inherited Job handle, and the kernel
+    terminates every contained descendant.
     """
     if proc.pid is None:
         return
 
     if sys.platform == "win32":
         try:
-            
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 stdout=subprocess.DEVNULL,
@@ -212,11 +345,10 @@ def _kill_tree(proc: "subprocess.Popen", pgid: int | None = None) -> None:
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
     else:
-        # POSIX: kill the captured pgid. Local-import signal so the
-        # SIGKILL attribute is never referenced on Windows.
         if pgid is not None:
             try:
                 import signal as _signal
+
                 os.killpg(pgid, _signal.SIGKILL)  # windows-footgun: ok
             except (ProcessLookupError, PermissionError, OSError):
                 pass
@@ -228,11 +360,44 @@ def _kill_tree(proc: "subprocess.Popen", pgid: int | None = None) -> None:
         pass
 
 
+class _ShutdownController:
+    """Signal cleanup for active per-file pytest processes."""
+
+    def __init__(
+        self,
+        shutdown_requested: threading.Event,
+        active_processes: dict[int, tuple[Any, int | None]],
+        active_processes_lock: threading.Lock,
+    ) -> None:
+        self.shutdown_requested = shutdown_requested
+        self.active_processes = active_processes
+        self.active_processes_lock = active_processes_lock
+        self.received_signal: int | None = None
+        # A Python signal handler can nest before its first assignment.  A
+        # nonblocking Lock acquisition is the atomic one-winner operation;
+        # the winner deliberately keeps it acquired for the runner lifetime.
+        self._winner_guard: Any = threading.Lock()
+
+    def handle_signal(self, signum: int, _frame: object) -> None:
+        if not self._winner_guard.acquire(blocking=False):
+            return
+        self.received_signal = signum
+        self.shutdown_requested.set()
+        with self.active_processes_lock:
+            processes = list(self.active_processes.values())
+        for proc, pgid in processes:
+            _kill_tree(proc, pgid=pgid)
+
+
 def _run_one_file(
     file: Path,
     pytest_args: List[str],
     repo_root: Path,
     file_timeout: float,
+    isolated_hermes_home: Path,
+    shutdown_requested: threading.Event,
+    active_processes: dict[int, tuple[Any, int | None]],
+    active_processes_lock: threading.Lock,
     retries: int = 0,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Run ``python -m pytest <file> <pytest_args>`` in a fresh subprocess.
@@ -267,15 +432,34 @@ def _run_one_file(
     orphan onto PID 1. This outer timeout exists only to
     bound a pathologically slow or hung file as a whole.
     """
+    def _attempt_home(attempt_index: int) -> Path:
+        home = isolated_hermes_home / f"attempt-{attempt_index}"
+        home.mkdir(parents=True)
+        return home
+
     file, rc, output, summary, subproc_wall = _run_one_file_once(
-        file, pytest_args, repo_root, file_timeout
+        file,
+        pytest_args,
+        repo_root,
+        file_timeout,
+        _attempt_home(0),
+        shutdown_requested,
+        active_processes,
+        active_processes_lock,
     )
     attempt = 0
-    while rc != 0 and attempt < retries:
+    while rc != 0 and attempt < retries and not shutdown_requested.is_set():
         attempt += 1
         first_output = output
         file, rc, output, summary, subproc_wall2 = _run_one_file_once(
-            file, pytest_args, repo_root, file_timeout
+            file,
+            pytest_args,
+            repo_root,
+            file_timeout,
+            _attempt_home(attempt),
+            shutdown_requested,
+            active_processes,
+            active_processes_lock,
         )
         subproc_wall += subproc_wall2
         if rc == 0:
@@ -303,36 +487,43 @@ def _run_one_file_once(
     pytest_args: List[str],
     repo_root: Path,
     file_timeout: float,
+    isolated_hermes_home: Path,
+    shutdown_requested: threading.Event,
+    active_processes: dict[int, tuple[Any, int | None]],
+    active_processes_lock: threading.Lock,
 ) -> Tuple[Path, int, str, dict[str, int], float]:
     """Single attempt of a per-file pytest subprocess (see _run_one_file)."""
+    if shutdown_requested.is_set():
+        return file, 130, "runner interrupted before file started\n", {}, 0.0
+
     cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
-    
+    child_env = os.environ.copy()
+    child_env["HERMES_HOME"] = str(isolated_hermes_home)
+
     subproc_start = time.monotonic()
-    # launch the pytest process
     proc = subprocess.Popen(
         cmd,
         cwd=repo_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True, encoding="utf-8", errors="replace",
-        env=os.environ,
-        # POSIX: place the child at the head of its own process group so
-        # _kill_tree can SIGKILL the group atomically.
-        # Windows: this maps to CREATE_NEW_PROCESS_GROUP in CPython 3.12+;
-        # _kill_tree handles the Windows path via taskkill /F /T.
-        start_new_session=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=child_env,
+        start_new_session=sys.platform != "win32",
     )
 
-    # Capture the pgid NOW, before the leader can exit and be reaped. Once
-    # the leader is reaped, os.getpgid(proc.pid) raises ProcessLookupError
-    # even though grandchildren in that group are still alive — defeating
-    # the whole cleanup. None on Windows where the pgid concept doesn't apply.
-    pgid: int | None = None
-    if sys.platform != "win32":
-        try:
-            pgid = os.getpgid(proc.pid)
-        except (ProcessLookupError, PermissionError):
-            pgid = None
+    # ``start_new_session=True`` makes the POSIX child a session and process-
+    # group leader, so its pgid is exactly its pid. Record that deterministic
+    # value without a kernel lookup: a very fast pytest leader can exit before
+    # ``os.getpgid`` runs while leaving descendants in the group.
+    pgid: int | None = proc.pid if sys.platform != "win32" else None
+
+    with active_processes_lock:
+        active_processes[proc.pid] = (proc, pgid)
+        stop_after_register = shutdown_requested.is_set()
+    if stop_after_register:
+        _kill_tree(proc, pgid=pgid)
 
     try:
         output, _ = proc.communicate(timeout=file_timeout)
@@ -358,7 +549,10 @@ def _run_one_file_once(
         # case it left grandchildren behind; already-dead is a no-op.
         _kill_tree(proc, pgid=pgid)
 
-        output +=  "\n"
+        output += "\n"
+    finally:
+        with active_processes_lock:
+            active_processes.pop(proc.pid, None)
 
     if rc == 5:
         # No tests collected in THIS file — legitimate per-file: a
@@ -1017,21 +1211,91 @@ def main() -> int:
             if rc != 0:
                 _print_inline_failure(fpath, output, repo_root, pytest_passthrough)
 
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures: List[Future] = []
-        for file in files:
-            t0 = time.monotonic()
-            fut = pool.submit(
-                _run_one_file, file, pytest_passthrough, repo_root,
-                args.file_timeout, args.file_retries,
-            )
-            fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
-            futures.append(fut)
-        # Block until everything's done. ThreadPoolExecutor.__exit__ waits
-        # for all submitted work, but doing it explicitly here makes the
-        # control flow obvious.
-        for fut in futures:
-            fut.result() if fut.exception() is None else None
+    # On Windows, contain the runner itself before any pytest subprocess is
+    # created. Descendants inherit Job membership from birth, and a hard
+    # TerminateProcess of the runner closes the last non-inherited Job handle.
+    _windows_runner_job: _WindowsJob | Any | None = None
+    if sys.platform == "win32":
+        try:
+            _windows_runner_job = _create_windows_runner_job()
+        except OSError as exc:
+            print(f"ERROR: failed to establish Windows process containment: {exc}")
+            return 1
+
+    shutdown_requested = threading.Event()
+    active_processes: dict[int, tuple[Any, int | None]] = {}
+    active_processes_lock = threading.Lock()
+    shutdown_controller = _ShutdownController(
+        shutdown_requested,
+        active_processes,
+        active_processes_lock,
+    )
+    previous_handlers: dict[int, Any] = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, shutdown_controller.handle_signal)
+        except (OSError, ValueError):
+            pass
+
+    isolation_setup_error: OSError | None = None
+    cleanup_error: OSError | None = None
+    try:
+        try:
+            isolation_dir = tempfile.TemporaryDirectory(prefix="hermes-test-run-")
+        except OSError as exc:
+            isolation_setup_error = exc
+        else:
+            try:
+                isolation_root = isolation_dir.name
+                with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+                    futures: List[Future] = []
+                    for file_index, file in enumerate(files):
+                        file_home = Path(isolation_root) / str(file_index)
+                        t0 = time.monotonic()
+                        fut = pool.submit(
+                            _run_one_file,
+                            file,
+                            pytest_passthrough,
+                            repo_root,
+                            args.file_timeout,
+                            file_home,
+                            shutdown_requested,
+                            active_processes,
+                            active_processes_lock,
+                            args.file_retries,
+                        )
+                        fut.add_done_callback(lambda f, file=file, t0=t0: _on_done(file, t0, f))
+                        futures.append(fut)
+                    # Block until everything's done. ThreadPoolExecutor.__exit__ waits
+                    # for all submitted work, but doing it explicitly here makes the
+                    # control flow obvious.
+                    for fut in futures:
+                        fut.result() if fut.exception() is None else None
+            finally:
+                try:
+                    isolation_dir.cleanup()
+                except OSError as exc:
+                    cleanup_error = exc
+    finally:
+        # Restore first, then inspect received_signal. A signal delivered while
+        # a not-yet-restored handler is still ours is therefore observed below;
+        # after restoration, the caller's/default semantics apply instead.
+        for sig, previous_handler in previous_handlers.items():
+            signal.signal(sig, previous_handler)
+
+    if isolation_setup_error is not None:
+        print(f"ERROR: failed to create isolated test root: {isolation_setup_error}")
+        return 1
+    if cleanup_error is not None:
+        print(f"ERROR: failed to remove isolated test root: {cleanup_error}")
+        return 1
+    if shutdown_controller.received_signal is not None:
+        print(
+            f"Interrupted by signal {shutdown_controller.received_signal}; "
+            "active test trees cleaned up"
+        )
+        return 128 + shutdown_controller.received_signal
 
     elapsed = time.monotonic() - started
     print()
