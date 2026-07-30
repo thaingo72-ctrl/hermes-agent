@@ -340,3 +340,19 @@ def test_security_pins_present_in_mirrored_lazy_features():
         "pyproject extras — the lazy install path would not enforce the "
         "CVE-patched floor:\n  " + "\n  ".join(problems)
     )
+
+def test_hermes_state_support_modules_are_packaged():
+    """Editable/sealed venvs must include every module imported by hermes_state."""
+    root = Path(__file__).resolve().parents[1]
+    with (root / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)
+
+    modules = set(project["tool"]["setuptools"]["py-modules"])
+    expected = {
+        "hermes_state",
+        "hermes_state_common",
+        "hermes_state_portability",
+        "hermes_state_schema",
+        "hermes_state_search",
+    }
+    assert expected <= modules
