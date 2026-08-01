@@ -4,11 +4,6 @@ Platform Adapter Registry
 Allows platform adapters (built-in and plugin) to self-register so the gateway
 can discover and instantiate them without hardcoded if/elif chains.
 
-Built-in adapters continue to use the existing if/elif in _create_adapter()
-for now.  Plugin adapters register here via PluginContext.register_platform()
-and are looked up first -- if nothing is found the gateway falls through to
-the legacy code path.
-
 Usage (plugin side):
 
     from gateway.platform_registry import platform_registry, PlatformEntry
@@ -33,6 +28,21 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+_SOURCE_PRIORITY = {
+    "builtin": 10,
+    "plugin": 100,
+}
+
+
+def _source_priority(source: str) -> int:
+    return _SOURCE_PRIORITY.get(source, 50)
+
+
+@dataclass
+class _DeferredPlatform:
+    loader: Callable[[], None]
+    source: str = "plugin"
 
 
 @dataclass
@@ -167,7 +177,7 @@ class PlatformRegistry:
     """
 
     def __init__(self) -> None:
-        self._entries: dict[str, PlatformEntry] = {}
+        self._entries: dict[str, dict[str, PlatformEntry]] = {}
         # Deferred platform loaders: name -> zero-arg callable that imports the
         # owning plugin module (which calls register() and populates _entries).
         #
@@ -180,39 +190,59 @@ class PlatformRegistry:
         # platform; the real module is imported only when a registry lookup
         # actually asks for that platform (gateway start, cron delivery,
         # `hermes setup`/`gateway status`, send_message).
-        self._deferred: dict[str, Callable[[], None]] = {}
+        self._deferred: dict[str, dict[str, _DeferredPlatform]] = {}
 
     # -- deferred loading ----------------------------------------------------
 
-    def register_deferred(self, name: str, loader: Callable[[], None]) -> None:
+    def register_deferred(
+        self,
+        name: str,
+        loader: Callable[[], None],
+        *,
+        source: str = "plugin",
+    ) -> None:
         """Register a lazy loader for a platform that hasn't been imported yet.
 
         *loader* is a zero-arg callable that imports the owning plugin module,
         which is expected to call :meth:`register` with the real entry for
         *name*.  The loader runs at most once, the first time *name* is looked
-        up (or when the full entry list is materialized).  A real entry that is
-        registered directly (e.g. a built-in) takes precedence -- the deferred
-        loader is then dropped.
+        up (or when the full entry list is materialized).  Concrete entries and
+        deferred loaders coexist by source priority, so a deferred plugin can
+        still override an already-registered built-in.
         """
-        if name in self._entries:
-            # Already concretely registered; no need to defer.
+        if source in self._entries.get(name, {}):
+            # Already concretely registered for this source; no need to defer.
             return
-        self._deferred[name] = loader
+        self._deferred.setdefault(name, {})[source] = _DeferredPlatform(
+            loader=loader,
+            source=source,
+        )
 
-    def _resolve(self, name: str) -> None:
-        """Run the deferred loader for *name* if one is pending."""
-        loader = self._deferred.pop(name, None)
-        if loader is None:
+    def _resolve(self, name: str, source: str | None = None) -> None:
+        """Run pending deferred loaders for *name*."""
+        pending_by_source = self._deferred.get(name)
+        if not pending_by_source:
             return
-        try:
-            loader()
-        except Exception as e:
-            logger.warning(
-                "Deferred load of platform '%s' failed: %s",
-                name,
-                e,
-                exc_info=True,
-            )
+        sources = [source] if source is not None else sorted(
+            pending_by_source,
+            key=_source_priority,
+            reverse=True,
+        )
+        for pending_source in sources:
+            pending = pending_by_source.pop(pending_source, None)
+            if pending is None:
+                continue
+            try:
+                pending.loader()
+            except Exception as e:
+                logger.warning(
+                    "Deferred load of platform '%s' failed: %s",
+                    name,
+                    e,
+                    exc_info=True,
+                )
+        if not pending_by_source:
+            self._deferred.pop(name, None)
 
     def _resolve_all(self) -> None:
         """Run every pending deferred loader.
@@ -231,20 +261,26 @@ class PlatformRegistry:
     def register(self, entry: PlatformEntry) -> None:
         """Register a platform adapter entry.
 
-        If an entry with the same name exists, it is replaced (last writer
-        wins -- this lets plugins override built-in adapters if desired).
+        If an entry with the same name and source exists, it is replaced.
+        Different sources coexist and are selected by explicit source priority.
         """
-        # A concrete registration supersedes any pending deferred loader.
-        self._deferred.pop(entry.name, None)
-        if entry.name in self._entries:
-            prev = self._entries[entry.name]
+        # A concrete registration supersedes any pending deferred loader for
+        # the same source, but not a lower/higher-priority entry for fallback.
+        if entry.name in self._deferred:
+            self._deferred[entry.name].pop(entry.source, None)
+            if not self._deferred[entry.name]:
+                self._deferred.pop(entry.name, None)
+
+        entries = self._entries.setdefault(entry.name, {})
+        if entry.source in entries:
+            prev = entries[entry.source]
             logger.info(
                 "Platform '%s' re-registered (was %s, now %s)",
                 entry.name,
                 prev.source,
                 entry.source,
             )
-        self._entries[entry.name] = entry
+        entries[entry.source] = entry
         logger.debug("Registered platform adapter: %s (%s)", entry.name, entry.source)
 
     def unregister(self, name: str) -> bool:
@@ -254,19 +290,22 @@ class PlatformRegistry:
 
     def get(self, name: str) -> Optional[PlatformEntry]:
         """Look up a platform entry by name."""
-        if name not in self._entries:
-            self._resolve(name)
-        return self._entries.get(name)
+        self._resolve(name)
+        return self._highest_priority_entry(name)
 
     def all_entries(self) -> list[PlatformEntry]:
         """Return all registered platform entries."""
         self._resolve_all()
-        return list(self._entries.values())
+        return [
+            entry
+            for name in self._entries
+            if (entry := self._highest_priority_entry(name)) is not None
+        ]
 
     def plugin_entries(self) -> list[PlatformEntry]:
         """Return only plugin-registered platform entries."""
         self._resolve_all()
-        return [e for e in self._entries.values() if e.source == "plugin"]
+        return [e for e in self.all_entries() if e.source == "plugin"]
 
     def is_registered(self, name: str) -> bool:
         # A deferred (not-yet-imported) platform still counts as registered --
@@ -274,6 +313,23 @@ class PlatformRegistry:
         # membership checks (toolset resolution, webhook deliver-target checks)
         # from triggering a heavy import.
         return name in self._entries or name in self._deferred
+
+    def _highest_priority_entry(self, name: str) -> Optional[PlatformEntry]:
+        entries = self._entries.get(name)
+        if not entries:
+            return None
+        return max(entries.values(), key=lambda entry: _source_priority(entry.source))
+
+    def _candidate_entries(self, name: str) -> list[PlatformEntry]:
+        self._resolve(name)
+        entries = self._entries.get(name)
+        if not entries:
+            return []
+        return sorted(
+            entries.values(),
+            key=lambda entry: _source_priority(entry.source),
+            reverse=True,
+        )
 
     def create_adapter(self, name: str, config: Any) -> Optional[Any]:
         """Create an adapter instance for the given platform name.
@@ -284,49 +340,197 @@ class PlatformRegistry:
         - validate_config() returns False (misconfigured)
         - The factory raises an exception
         """
-        if name not in self._entries:
-            self._resolve(name)
-        entry = self._entries.get(name)
-        if entry is None:
+        entries = self._candidate_entries(name)
+        if not entries:
             return None
 
-        if not entry.check_fn():
+        for index, entry in enumerate(entries):
+            has_fallback = index + 1 < len(entries)
+            if not self._requirements_available(entry):
+                if has_fallback:
+                    continue
+                return None
+
+            if entry.validate_config is not None:
+                try:
+                    if not entry.validate_config(config):
+                        logger.warning(
+                            "Platform '%s' config validation failed",
+                            entry.label,
+                        )
+                        if has_fallback:
+                            continue
+                        return None
+                except Exception as e:
+                    logger.warning(
+                        "Platform '%s' config validation error: %s",
+                        entry.label,
+                        e,
+                    )
+                    if has_fallback:
+                        continue
+                    return None
+
+            try:
+                adapter = entry.adapter_factory(config)
+                return adapter
+            except Exception as e:
+                logger.error(
+                    "Failed to create adapter for platform '%s': %s",
+                    entry.label,
+                    e,
+                    exc_info=True,
+                )
+                if has_fallback:
+                    continue
+                return None
+        return None
+
+    def _requirements_available(self, entry: PlatformEntry) -> bool:
+        try:
+            available = entry.check_fn()
+        except Exception as e:
+            hint = f" ({entry.install_hint})" if entry.install_hint else ""
+            logger.warning(
+                "Platform '%s' requirements check failed%s: %s",
+                entry.label,
+                hint,
+                e,
+                exc_info=True,
+            )
+            return False
+        if not available:
             hint = f" ({entry.install_hint})" if entry.install_hint else ""
             logger.warning(
                 "Platform '%s' requirements not met%s",
                 entry.label,
                 hint,
             )
-            return None
+            return False
+        return True
 
-        if entry.validate_config is not None:
-            try:
-                if not entry.validate_config(config):
-                    logger.warning(
-                        "Platform '%s' config validation failed",
-                        entry.label,
-                    )
-                    return None
-            except Exception as e:
-                logger.warning(
-                    "Platform '%s' config validation error: %s",
-                    entry.label,
-                    e,
-                )
-                return None
 
-        try:
-            adapter = entry.adapter_factory(config)
-            return adapter
-        except Exception as e:
-            logger.error(
-                "Failed to create adapter for platform '%s': %s",
-                entry.label,
-                e,
-                exc_info=True,
+def _lazy_callable(module_name: str, attr_name: str) -> Callable[..., Any]:
+    def _call(*args: Any, **kwargs: Any) -> Any:
+        import importlib
+
+        module = importlib.import_module(module_name)
+        return getattr(module, attr_name)(*args, **kwargs)
+
+    return _call
+
+
+def _lazy_yuanbao_requirements() -> bool:
+    import importlib
+
+    module = importlib.import_module("gateway.platforms.yuanbao")
+    return bool(getattr(module, "WEBSOCKETS_AVAILABLE", False))
+
+
+def _register_builtin_platforms(registry: PlatformRegistry) -> None:
+    builtin_specs = [
+        (
+            "whatsapp_cloud",
+            "WhatsApp Cloud",
+            "gateway.platforms.whatsapp_cloud",
+            "WhatsAppCloudAdapter",
+            "check_whatsapp_cloud_requirements",
+            None,
+            "aiohttp/httpx missing; reinstall hermes-agent",
+        ),
+        (
+            "signal",
+            "Signal",
+            "gateway.platforms.signal",
+            "SignalAdapter",
+            "check_signal_requirements",
+            "validate_signal_config",
+            "signal-cli-rest-api not configured; set SIGNAL_HTTP_URL and SIGNAL_ACCOUNT",
+        ),
+        (
+            "weixin",
+            "Weixin",
+            "gateway.platforms.weixin",
+            "WeixinAdapter",
+            "check_weixin_requirements",
+            None,
+            "aiohttp/cryptography not installed",
+        ),
+        (
+            "api_server",
+            "API Server",
+            "gateway.platforms.api_server",
+            "APIServerAdapter",
+            "check_api_server_requirements",
+            None,
+            "aiohttp not installed",
+        ),
+        (
+            "webhook",
+            "Webhook",
+            "gateway.platforms.webhook",
+            "WebhookAdapter",
+            "check_webhook_requirements",
+            None,
+            "aiohttp not installed",
+        ),
+        (
+            "msgraph_webhook",
+            "MSGraph webhook",
+            "gateway.platforms.msgraph_webhook",
+            "MSGraphWebhookAdapter",
+            "check_msgraph_webhook_requirements",
+            None,
+            "aiohttp not installed",
+        ),
+        (
+            "bluebubbles",
+            "BlueBubbles",
+            "gateway.platforms.bluebubbles",
+            "BlueBubblesAdapter",
+            "check_bluebubbles_requirements",
+            None,
+            "aiohttp/httpx missing or BLUEBUBBLES_SERVER_URL/BLUEBUBBLES_PASSWORD not configured",
+        ),
+        (
+            "qqbot",
+            "QQBot",
+            "gateway.platforms.qqbot",
+            "QQAdapter",
+            "check_qq_requirements",
+            None,
+            "aiohttp/httpx missing or QQ_APP_ID/QQ_CLIENT_SECRET not configured",
+        ),
+    ]
+    for name, label, module_name, adapter_name, check_name, validate_name, hint in builtin_specs:
+        registry.register(
+            PlatformEntry(
+                name=name,
+                label=label,
+                adapter_factory=_lazy_callable(module_name, adapter_name),
+                check_fn=_lazy_callable(module_name, check_name),
+                validate_config=(
+                    _lazy_callable(module_name, validate_name)
+                    if validate_name is not None
+                    else None
+                ),
+                install_hint=hint,
+                source="builtin",
             )
-            return None
+        )
+
+    registry.register(
+        PlatformEntry(
+            name="yuanbao",
+            label="Yuanbao",
+            adapter_factory=_lazy_callable("gateway.platforms.yuanbao", "YuanbaoAdapter"),
+            check_fn=_lazy_yuanbao_requirements,
+            install_hint="Run: pip install websockets",
+            source="builtin",
+        )
+    )
 
 
 # Module-level singleton
 platform_registry = PlatformRegistry()
+_register_builtin_platforms(platform_registry)

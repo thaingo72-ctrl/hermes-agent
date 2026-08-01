@@ -1,6 +1,9 @@
 """Tests for the platform adapter registry and dynamic Platform enum."""
 
+import importlib
 import os
+import sys
+import types
 import pytest
 from unittest.mock import MagicMock
 
@@ -98,6 +101,124 @@ class TestPlatformRegistry:
         )
         reg.register(entry)
         assert reg.create_adapter("novalidate", MagicMock()) is mock_adapter
+
+    def test_plugin_entry_overrides_builtin_when_builtin_registered_first(self):
+        """Source priority must be explicit, not registration-order dependent."""
+        reg = PlatformRegistry()
+        builtin, _ = self._make_entry("alpha")
+        builtin.source = "builtin"
+        plugin, _ = self._make_entry("alpha")
+        plugin.source = "plugin"
+        plugin.plugin_name = "alpha-plugin"
+
+        reg.register(builtin)
+        reg.register(plugin)
+
+        entry = reg.get("alpha")
+        assert entry is plugin
+        assert entry.plugin_name == "alpha-plugin"
+
+    def test_plugin_entry_overrides_builtin_when_plugin_registered_first(self):
+        """A later built-in registration must not displace plugin authorship."""
+        reg = PlatformRegistry()
+        builtin, _ = self._make_entry("alpha")
+        builtin.source = "builtin"
+        plugin, _ = self._make_entry("alpha")
+        plugin.source = "plugin"
+        plugin.plugin_name = "alpha-plugin"
+
+        reg.register(plugin)
+        reg.register(builtin)
+
+        entry = reg.get("alpha")
+        assert entry is plugin
+        assert entry.plugin_name == "alpha-plugin"
+
+    def test_failed_higher_priority_plugin_loader_falls_back_to_builtin(self):
+        """A bad lazy plugin import must not corrupt the lower-priority builtin."""
+        reg = PlatformRegistry()
+        builtin_adapter = object()
+        builtin = PlatformEntry(
+            name="alpha",
+            label="Alpha Builtin",
+            adapter_factory=lambda cfg: builtin_adapter,
+            check_fn=lambda: True,
+            source="builtin",
+        )
+        calls = {"loader": 0}
+
+        def fail_plugin_load():
+            calls["loader"] += 1
+            raise RuntimeError("plugin import failed")
+
+        reg.register(builtin)
+        reg.register_deferred("alpha", fail_plugin_load, source="plugin")
+
+        assert reg.create_adapter("alpha", MagicMock()) is builtin_adapter
+        assert calls["loader"] == 1
+        assert reg.get("alpha") is builtin
+
+    def test_check_fn_exception_reports_unavailable(self, caplog):
+        """Preflight dependency check failures are contained."""
+        reg = PlatformRegistry()
+        entry = PlatformEntry(
+            name="boom",
+            label="Boom",
+            adapter_factory=lambda cfg: object(),
+            check_fn=lambda: (_ for _ in ()).throw(RuntimeError("sdk exploded")),
+            source="builtin",
+            install_hint="pip install boom",
+        )
+        reg.register(entry)
+
+        assert reg.create_adapter("boom", MagicMock()) is None
+        assert "requirements check failed" in caplog.text
+        assert "sdk exploded" in caplog.text
+
+    def test_importing_registry_does_not_import_builtin_adapter_modules(self):
+        """Built-in registration must stay lazy and not import platform SDKs."""
+        sys.modules.pop("gateway.platforms.webhook", None)
+        sys.modules.pop("gateway.platforms.api_server", None)
+
+        module = importlib.reload(sys.modules["gateway.platform_registry"])
+
+        assert module.platform_registry.is_registered("webhook")
+        assert module.platform_registry.is_registered("api_server")
+        assert "gateway.platforms.webhook" not in sys.modules
+        assert "gateway.platforms.api_server" not in sys.modules
+
+    def test_gateway_runner_create_adapter_uses_registry_for_builtins(self, monkeypatch):
+        """gateway/run must not keep a parallel hardcoded builtin factory path."""
+        monkeypatch.setitem(
+            sys.modules,
+            "dotenv",
+            types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None),
+        )
+        from gateway.config import GatewayConfig, PlatformConfig
+        from gateway.run import GatewayRunner
+
+        runner = object.__new__(GatewayRunner)
+        runner.config = GatewayConfig()
+        sentinel = types.SimpleNamespace()
+        calls = []
+
+        class FakeRegistry:
+            def is_registered(self, name):
+                calls.append(("is_registered", name))
+                return True
+
+            def create_adapter(self, name, config):
+                calls.append(("create_adapter", name, config))
+                return sentinel
+
+        monkeypatch.setattr("gateway.platform_registry.platform_registry", FakeRegistry())
+
+        cfg = PlatformConfig(enabled=True)
+        assert runner._create_adapter(Platform.WEBHOOK, cfg) is sentinel
+        assert calls == [
+            ("is_registered", "webhook"),
+            ("create_adapter", "webhook", cfg),
+        ]
 
 
 # ── GatewayConfig integration ────────────────────────────────────────────
