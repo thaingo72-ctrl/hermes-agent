@@ -11524,6 +11524,7 @@ from . import (  # noqa: E402
     methods_billing as _methods_billing,
     methods_complete as _methods_complete,
     methods_config as _methods_config,
+    methods_management as _methods_management,
     methods_prompt as _methods_prompt,
     methods_session as _methods_session,
     methods_session_lifecycle as _methods_session_lifecycle,
@@ -11809,6 +11810,24 @@ _methods_system.register(
         sync_session_key_after_compress=_sync_session_key_after_compress,
         send_compute_host_control=_send_compute_host_control,
         apply_compute_host_metadata_mirror=_apply_compute_host_metadata_mirror,
+    ),
+)
+_methods_management.register(
+    _methods,
+    services=_methods_management.default_management_services(
+        ok=_ok,
+        err=_err,
+        sessions=_sessions,
+        sessions_lock=_sessions_lock,
+        resolve_browser_cdp_url=lambda: _resolve_browser_cdp_url(),
+        browser_connect=lambda rid, params: _browser_connect(rid, params),
+        browser_disconnect=lambda rid: _browser_disconnect(rid),
+        load_cfg=lambda: _load_cfg(),
+        resolve_model=lambda: _resolve_model(),
+        cfg_max_turns=lambda cfg, default: _cfg_max_turns(cfg, default),
+        hermes_home=_hermes_home,
+        load_enabled_toolsets=lambda: _load_enabled_toolsets(),
+        reset_session_agent=lambda sid, session: _reset_session_agent(sid, session),
     ),
 )
 
