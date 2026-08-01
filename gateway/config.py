@@ -12,30 +12,33 @@ import logging
 import os
 import json
 from pathlib import Path
-from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Dict, List, Optional, Any, Callable
 from enum import Enum
 
-from hermes_cli.config import get_hermes_home
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
 from agent.secret_scope import current_secret_scope, get_secret as _get_secret
+from gateway.profile_routing import ProfileRoute
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 
-_CANONICAL_TYPED_GATEWAY_KEYS = frozenset({
-    "loop_watchdog",
-    "max_concurrent_sessions",
-    "systemd_watchdog_seconds",
-    "multiplex_profiles",
-    "profile_routes",
-})
+
+def get_hermes_home() -> Path:
+    from hermes_cli.config import get_hermes_home as _get_hermes_home
+
+    return _get_hermes_home()
 
 
-def _canonical_typed_gateway_dump(typed_gateway_cfg: Any) -> dict:
-    return typed_gateway_cfg.model_dump(
-        mode="python",
-        exclude_none=True,
-        include=_CANONICAL_TYPED_GATEWAY_KEYS,
+def _hermes_home() -> Path:
+    return get_hermes_home()
+
+
+class _GatewayConfigBase(BaseModel):
+    model_config = ConfigDict(
+        extra="allow",
+        arbitrary_types_allowed=True,
+        validate_assignment=True,
     )
 
 
@@ -433,8 +436,7 @@ def platform_binds_port(platform_value: str, extra: Optional[dict] = None) -> bo
     return True
 
 
-@dataclass
-class HomeChannel:
+class HomeChannel(_GatewayConfigBase):
     """
     Default destination for a platform.
     
@@ -445,7 +447,7 @@ class HomeChannel:
     """
     platform: Platform
     chat_id: str
-    name: str  # Human-readable name for display
+    name: str = "Home"  # Human-readable name for display
     thread_id: Optional[str] = None
     # Authenticated logical-target provenance observed by a platform adapter.
     # Relay egress re-attaches these values, but the connector remains the
@@ -454,29 +456,11 @@ class HomeChannel:
     scope_id: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "platform": self.platform.value,
-            "chat_id": self.chat_id,
-            "name": self.name,
-        }
-        if self.thread_id:
-            result["thread_id"] = self.thread_id
-        if self.user_id:
-            result["user_id"] = self.user_id
-        if self.scope_id:
-            result["scope_id"] = self.scope_id
-        return result
+        return self.model_dump(mode="json", exclude_none=True)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "HomeChannel":
-        return cls(
-            platform=Platform(data["platform"]),
-            chat_id=str(data["chat_id"]),
-            name=data.get("name", "Home"),
-            thread_id=str(data["thread_id"]) if data.get("thread_id") else None,
-            user_id=str(data["user_id"]) if data.get("user_id") else None,
-            scope_id=str(data["scope_id"]) if data.get("scope_id") else None,
-        )
+        return cls.model_validate(data)
 
 
 def persist_home_channel(home: HomeChannel, *, enabled_if_new: bool = False) -> None:
@@ -498,8 +482,7 @@ def persist_home_channel(home: HomeChannel, *, enabled_if_new: bool = False) -> 
     save_config(config)
 
 
-@dataclass
-class SessionResetPolicy:
+class SessionResetPolicy(_GatewayConfigBase):
     """
     Controls when sessions reset (lose context).
     
@@ -526,38 +509,38 @@ class SessionResetPolicy:
     # liveness should pin the conversation open.
     bg_process_max_age_hours: int = 24
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "mode": self.mode,
-            "at_hour": self.at_hour,
-            "idle_minutes": self.idle_minutes,
-            "notify": self.notify,
-            "notify_exclude_platforms": list(self.notify_exclude_platforms),
-            "bg_process_max_age_hours": self.bg_process_max_age_hours,
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_mapping(cls, data: Any) -> Any:
+        data = _coerce_dict(data)
+        if not data:
+            return data
+        normalized = dict(data)
+        defaults = {
+            "mode": "none",
+            "at_hour": 4,
+            "idle_minutes": 1440,
+            "bg_process_max_age_hours": 24,
         }
+        for key, default in defaults.items():
+            if normalized.get(key) is None:
+                normalized[key] = default
+        return normalized
+
+    @field_validator("notify", mode="before")
+    @classmethod
+    def _coerce_notify(cls, value: Any) -> Any:
+        return _coerce_bool(value, True)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.model_dump(mode="json")
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SessionResetPolicy":
-        data = _coerce_dict(data)
-        # Handle both missing keys and explicit null values (YAML null → None)
-        mode = data.get("mode")
-        at_hour = data.get("at_hour")
-        idle_minutes = data.get("idle_minutes")
-        notify = data.get("notify")
-        exclude = data.get("notify_exclude_platforms")
-        bg_max_age = data.get("bg_process_max_age_hours")
-        return cls(
-            mode=mode if mode is not None else "none",
-            at_hour=at_hour if at_hour is not None else 4,
-            idle_minutes=idle_minutes if idle_minutes is not None else 1440,
-            notify=_coerce_bool(notify, True),
-            notify_exclude_platforms=tuple(exclude) if exclude is not None else ("api_server", "webhook"),
-            bg_process_max_age_hours=bg_max_age if bg_max_age is not None else 24,
-        )
+        return cls.model_validate(data)
 
 
-@dataclass
-class ChannelOverride:
+class ChannelOverride(_GatewayConfigBase):
     """
     Per-channel override for model, provider, and system prompt.
 
@@ -570,24 +553,11 @@ class ChannelOverride:
     system_prompt: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {}
-        if self.model is not None:
-            out["model"] = self.model
-        if self.provider is not None:
-            out["provider"] = self.provider
-        if self.system_prompt is not None:
-            out["system_prompt"] = self.system_prompt
-        return out
+        return self.model_dump(mode="json", exclude_none=True)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ChannelOverride":
-        if not data:
-            return cls()
-        return cls(
-            model=data.get("model"),
-            provider=data.get("provider"),
-            system_prompt=data.get("system_prompt"),
-        )
+        return cls.model_validate(_coerce_dict(data))
 
 
 # Canonical map of platforms whose primary credential is ``PlatformConfig.token``
@@ -606,8 +576,7 @@ PLATFORM_TOKEN_ENV_NAMES: dict["Platform", str] = {
 }
 
 
-@dataclass
-class PlatformConfig:
+class PlatformConfig(_GatewayConfigBase):
     """Configuration for a single messaging platform."""
     enabled: bool = False
     token: Optional[str] = None  # Bot token (Telegram, Discord)
@@ -646,40 +615,48 @@ class PlatformConfig:
     typing_status_text: Optional[str] = None
 
     # Per-channel model/provider/system_prompt overrides (channel_id -> ChannelOverride)
-    channel_overrides: Dict[str, ChannelOverride] = field(default_factory=dict)
+    channel_overrides: Dict[str, ChannelOverride] = Field(default_factory=dict)
 
     # Platform-specific settings
-    extra: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_mapping(cls, data: Any) -> Any:
+        data = _coerce_dict(data)
+        if isinstance(data.get("home_channel"), dict):
+            data = dict(data)
+            data["home_channel"] = HomeChannel.model_validate(data["home_channel"])
+        raw_overrides = data.get("channel_overrides") or {}
+        if isinstance(raw_overrides, dict):
+            data = dict(data)
+            data["channel_overrides"] = {
+                str(cid): (
+                    ov_data
+                    if isinstance(ov_data, ChannelOverride)
+                    else ChannelOverride.model_validate(ov_data)
+                )
+                for cid, ov_data in raw_overrides.items()
+                if isinstance(ov_data, (dict, ChannelOverride))
+            }
+        return data
+
+    @field_validator(
+        "enabled",
+        "gateway_restart_notification",
+        "typing_indicator",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_bools(cls, value: Any) -> Any:
+        return _coerce_bool(value, True)
 
     def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "enabled": self.enabled,
-            "extra": self.extra,
-            "reply_to_mode": self.reply_to_mode,
-            "gateway_restart_notification": self.gateway_restart_notification,
-            "typing_indicator": self.typing_indicator,
-        }
-        if self.typing_status_text is not None:
-            result["typing_status_text"] = self.typing_status_text
-        if self.token:
-            result["token"] = self.token
-        if self.api_key:
-            result["api_key"] = self.api_key
-        if self.home_channel:
-            result["home_channel"] = self.home_channel.to_dict()
-        if self.channel_overrides:
-            result["channel_overrides"] = {
-                cid: ov.to_dict() for cid, ov in self.channel_overrides.items()
-            }
-        return result
+        return self.model_dump(mode="json", exclude_none=True)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PlatformConfig":
         data = _coerce_dict(data)
-        home_channel = None
-        if isinstance(data.get("home_channel"), dict):
-            home_channel = HomeChannel.from_dict(data["home_channel"])
-
         # gateway_restart_notification may be bridged into extra via the
         # shared-key loop in load_gateway_config(); check both top-level
         # and extra so YAML ``discord: gateway_restart_notification: false``
@@ -702,25 +679,19 @@ class PlatformConfig:
         if _typing_text is None:
             _typing_text = extra.get("typing_status_text")
 
-        channel_overrides: Dict[str, ChannelOverride] = {}
-        raw_overrides = data.get("channel_overrides") or {}
-        if isinstance(raw_overrides, dict):
-            for cid, ov_data in raw_overrides.items():
-                if isinstance(ov_data, dict):
-                    channel_overrides[str(cid)] = ChannelOverride.from_dict(ov_data)
-
-        return cls(
+        normalized = dict(data)
+        normalized.update(
             enabled=_coerce_bool(data.get("enabled"), False),
-            token=data.get("token"),
-            api_key=data.get("api_key"),
-            home_channel=home_channel,
-            reply_to_mode=data.get("reply_to_mode", "first"),
             gateway_restart_notification=_coerce_bool(_grn, True),
             typing_indicator=_coerce_bool(_typing, True),
             typing_status_text=_typing_text,
-            channel_overrides=channel_overrides,
             extra=extra,
         )
+        if "home_channel" in normalized and not isinstance(
+            normalized["home_channel"], (dict, HomeChannel)
+        ):
+            normalized.pop("home_channel", None)
+        return cls.model_validate(normalized)
 
 
 # Streaming defaults — single source of truth so both StreamingConfig and
@@ -733,8 +704,7 @@ DEFAULT_STREAMING_BUFFER_THRESHOLD: int = 24
 DEFAULT_STREAMING_CURSOR: str = " ▉"
 
 
-@dataclass
-class StreamingConfig:
+class StreamingConfig(_GatewayConfigBase):
     """Configuration for real-time token streaming to messaging platforms."""
     enabled: bool = False
     # Transport selection:
@@ -767,14 +737,7 @@ class StreamingConfig:
     fresh_final_after_seconds: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "transport": self.transport,
-            "edit_interval": self.edit_interval,
-            "buffer_threshold": self.buffer_threshold,
-            "cursor": self.cursor,
-            "fresh_final_after_seconds": self.fresh_final_after_seconds,
-        }
+        return self.model_dump(mode="json")
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "StreamingConfig":
@@ -885,29 +848,28 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
 }
 
 
-@dataclass
-class GatewayConfig:
+class GatewayConfig(_GatewayConfigBase):
     """
     Main gateway configuration.
     
     Manages all platform connections, session policies, and delivery settings.
     """
     # Platform configurations
-    platforms: Dict[Platform, PlatformConfig] = field(default_factory=dict)
+    platforms: Dict[Platform, PlatformConfig] = Field(default_factory=dict)
     
     # Session reset policies by type
-    default_reset_policy: SessionResetPolicy = field(default_factory=SessionResetPolicy)
-    reset_by_type: Dict[str, SessionResetPolicy] = field(default_factory=dict)
-    reset_by_platform: Dict[Platform, SessionResetPolicy] = field(default_factory=dict)
+    default_reset_policy: SessionResetPolicy = Field(default_factory=SessionResetPolicy)
+    reset_by_type: Dict[str, SessionResetPolicy] = Field(default_factory=dict)
+    reset_by_platform: Dict[Platform, SessionResetPolicy] = Field(default_factory=dict)
     
     # Reset trigger commands
-    reset_triggers: List[str] = field(default_factory=lambda: ["/new", "/reset"])
+    reset_triggers: List[str] = Field(default_factory=lambda: ["/new", "/reset"])
 
     # User-defined quick commands (slash commands that bypass the agent loop)
-    quick_commands: Dict[str, Any] = field(default_factory=dict)
+    quick_commands: Dict[str, Any] = Field(default_factory=dict)
     
     # Storage paths
-    sessions_dir: Path = field(default_factory=lambda: get_hermes_home() / "sessions")
+    sessions_dir: Path = Field(default_factory=lambda: _hermes_home() / "sessions")
 
     # Whether to keep writing the legacy sessions.json mirror of the gateway
     # routing index. The primary copy lives in state.db (gateway_routing
@@ -957,7 +919,7 @@ class GatewayConfig:
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
 
     # Streaming configuration
-    streaming: StreamingConfig = field(default_factory=StreamingConfig)
+    streaming: StreamingConfig = Field(default_factory=StreamingConfig)
 
     # Session store pruning: drop SessionEntry records older than this many
     # days from the in-memory dict and sessions.json.  Keeps the store from
@@ -969,12 +931,118 @@ class GatewayConfig:
     # Profile-based routing: route specific guilds/channels/threads to
     # different profiles. See gateway/profile_routing.py. Each entry is a
     # dict with: name, platform, profile, and optional guild_id/chat_id/thread_id.
-    profile_routes: list = field(default_factory=list)
+    profile_routes: List[ProfileRoute] = Field(default_factory=list)
 
-    def __post_init__(self) -> None:
-        self.systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(
-            self.systemd_watchdog_seconds
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_input(cls, value: Any) -> Any:
+        data = _coerce_dict(value)
+        if not data:
+            return data
+        data = dict(data)
+        nested_gateway = data.get("gateway") if isinstance(data.get("gateway"), dict) else {}
+
+        platforms: Dict[Platform, PlatformConfig] = {}
+        for platform_name, platform_data in _coerce_dict(data.get("platforms", {})).items():
+            if isinstance(platform_data, PlatformConfig):
+                try:
+                    platforms[Platform(platform_name)] = platform_data
+                except ValueError:
+                    pass
+                continue
+            if not isinstance(platform_data, dict):
+                continue
+            try:
+                platforms[Platform(platform_name)] = PlatformConfig.from_dict(platform_data)
+            except ValueError:
+                pass
+        data["platforms"] = platforms
+
+        if "default_reset_policy" in data:
+            data["default_reset_policy"] = SessionResetPolicy.model_validate(
+                data["default_reset_policy"]
+            )
+        data["reset_by_type"] = {
+            str(type_name): SessionResetPolicy.model_validate(policy_data)
+            for type_name, policy_data in _coerce_dict(data.get("reset_by_type", {})).items()
+        }
+        reset_by_platform: Dict[Platform, SessionResetPolicy] = {}
+        for platform_name, policy_data in _coerce_dict(data.get("reset_by_platform", {})).items():
+            try:
+                reset_by_platform[Platform(platform_name)] = SessionResetPolicy.model_validate(policy_data)
+            except ValueError:
+                pass
+        data["reset_by_platform"] = reset_by_platform
+
+        if "sessions_dir" in data:
+            data["sessions_dir"] = Path(data["sessions_dir"])
+
+        if "stt_enabled" not in data and isinstance(data.get("stt"), dict):
+            data["stt_enabled"] = data["stt"].get("enabled")
+        if "stt_echo_transcripts" not in data and isinstance(data.get("stt"), dict):
+            data["stt_echo_transcripts"] = data["stt"].get("echo_transcripts")
+
+        if "systemd_watchdog_seconds" not in data:
+            data["systemd_watchdog_seconds"] = nested_gateway.get("systemd_watchdog_seconds", 0)
+        if "loop_watchdog" not in data:
+            data["loop_watchdog"] = nested_gateway.get("loop_watchdog", True)
+        if "multiplex_profiles" not in data:
+            data["multiplex_profiles"] = nested_gateway.get("multiplex_profiles", False)
+        if "max_concurrent_sessions" not in data:
+            data["max_concurrent_sessions"] = nested_gateway.get("max_concurrent_sessions")
+
+        env_multiplex = _env_multiplex_profiles_override()
+        if env_multiplex is not None:
+            data["multiplex_profiles"] = env_multiplex
+
+        data["unauthorized_dm_behavior"] = _normalize_unauthorized_dm_behavior(
+            data.get("unauthorized_dm_behavior"),
+            "pair",
         )
+        data["streaming"] = StreamingConfig.from_dict(data.get("streaming", {}))
+        return data
+
+    @field_validator(
+        "write_sessions_json",
+        "always_log_local",
+        "filter_silence_narration",
+        "stt_enabled",
+        "stt_echo_transcripts",
+        "group_sessions_per_user",
+        "loop_watchdog",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_true_default_bools(cls, value: Any) -> Any:
+        return _coerce_bool(value, True)
+
+    @field_validator("thread_sessions_per_user", "multiplex_profiles", mode="before")
+    @classmethod
+    def _coerce_false_default_bools(cls, value: Any) -> Any:
+        return _coerce_bool(value, False)
+
+    @field_validator("systemd_watchdog_seconds", mode="before")
+    @classmethod
+    def _coerce_systemd_watchdog(cls, value: Any) -> Any:
+        return coerce_systemd_watchdog_seconds(value)
+
+    @field_validator("max_concurrent_sessions", mode="before")
+    @classmethod
+    def _coerce_max_concurrent_sessions(cls, value: Any) -> Any:
+        return _coerce_optional_positive_int(value, "gateway.max_concurrent_sessions")
+
+    @field_validator("session_store_max_age_days", mode="before")
+    @classmethod
+    def _coerce_session_store_max_age(cls, value: Any) -> Any:
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return 90
+
+    @field_validator("quick_commands", mode="before")
+    @classmethod
+    def _coerce_quick_commands(cls, value: Any) -> Any:
+        return value if isinstance(value, dict) else {}
 
     def get_connected_platforms(self) -> List[Platform]:
         """Return list of platforms that are enabled and configured.
@@ -1063,192 +1131,7 @@ class GatewayConfig:
         return self.default_reset_policy
     
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "platforms": {
-                p.value: c.to_dict() for p, c in self.platforms.items()
-            },
-            "default_reset_policy": self.default_reset_policy.to_dict(),
-            "reset_by_type": {
-                k: v.to_dict() for k, v in self.reset_by_type.items()
-            },
-            "reset_by_platform": {
-                p.value: v.to_dict() for p, v in self.reset_by_platform.items()
-            },
-            "reset_triggers": self.reset_triggers,
-            "quick_commands": self.quick_commands,
-            "sessions_dir": str(self.sessions_dir),
-            "write_sessions_json": self.write_sessions_json,
-            "always_log_local": self.always_log_local,
-            "filter_silence_narration": self.filter_silence_narration,
-            "stt_enabled": self.stt_enabled,
-            "stt_echo_transcripts": self.stt_echo_transcripts,
-            "group_sessions_per_user": self.group_sessions_per_user,
-            "thread_sessions_per_user": self.thread_sessions_per_user,
-            "max_concurrent_sessions": self.max_concurrent_sessions,
-            "multiplex_profiles": self.multiplex_profiles,
-            "systemd_watchdog_seconds": self.systemd_watchdog_seconds,
-            "loop_watchdog": self.loop_watchdog,
-            "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
-            "streaming": self.streaming.to_dict(),
-            "session_store_max_age_days": self.session_store_max_age_days,
-            "profile_routes": [
-                asdict(r) if is_dataclass(r) and not isinstance(r, type) else r
-                for r in self.profile_routes
-            ],
-        }
-
-    def model_dump(self, *, mode: str = "python", **_: Any) -> Dict[str, Any]:
-        """Pydantic-compatible dump for the canonical gateway runtime config."""
-        data = self.to_dict()
-        if mode == "json":
-            # ``to_dict`` already stringifies Path/Enum leaves. json round-trip
-            # defensively proves no dataclass or Path instances remain.
-            return json.loads(json.dumps(data))
-        return data
-
-    @classmethod
-    def model_validate(cls, data: Any) -> "GatewayConfig":
-        """Pydantic-compatible validation entry point backed by from_dict."""
-        if isinstance(data, cls):
-            return data
-        if not isinstance(data, dict):
-            raise TypeError("GatewayConfig.model_validate expected a mapping")
-        return cls.from_dict(data)
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
-        data = _coerce_dict(data)
-        platforms = {}
-        platforms_data = _coerce_dict(data.get("platforms", {}))
-        for platform_name, platform_data in platforms_data.items():
-            if not isinstance(platform_data, dict):
-                continue
-            try:
-                platform = Platform(platform_name)
-                platforms[platform] = PlatformConfig.from_dict(platform_data)
-            except ValueError:
-                pass  # Skip unknown platforms
-        
-        reset_by_type = {}
-        for type_name, policy_data in _coerce_dict(data.get("reset_by_type", {})).items():
-            reset_by_type[type_name] = SessionResetPolicy.from_dict(policy_data)
-        
-        reset_by_platform = {}
-        for platform_name, policy_data in _coerce_dict(data.get("reset_by_platform", {})).items():
-            try:
-                platform = Platform(platform_name)
-                reset_by_platform[platform] = SessionResetPolicy.from_dict(policy_data)
-            except ValueError:
-                pass
-        
-        default_policy = SessionResetPolicy()
-        if "default_reset_policy" in data:
-            default_policy = SessionResetPolicy.from_dict(data["default_reset_policy"])
-        
-        sessions_dir = get_hermes_home() / "sessions"
-        if "sessions_dir" in data:
-            sessions_dir = Path(data["sessions_dir"])
-        
-        quick_commands = data.get("quick_commands", {})
-        if not isinstance(quick_commands, dict):
-            quick_commands = {}
-
-        stt_enabled = data.get("stt_enabled")
-        if stt_enabled is None:
-            stt_enabled = data.get("stt", {}).get("enabled") if isinstance(data.get("stt"), dict) else None
-        stt_echo_transcripts = data.get("stt_echo_transcripts")
-        if stt_echo_transcripts is None:
-            stt_echo_transcripts = (
-                data.get("stt", {}).get("echo_transcripts")
-                if isinstance(data.get("stt"), dict)
-                else None
-            )
-
-        group_sessions_per_user = data.get("group_sessions_per_user")
-        thread_sessions_per_user = data.get("thread_sessions_per_user")
-        multiplex_profiles = data.get("multiplex_profiles")
-        nested_gateway = data.get("gateway") if isinstance(data.get("gateway"), dict) else {}
-        if "systemd_watchdog_seconds" in data:
-            systemd_watchdog_raw = data.get("systemd_watchdog_seconds")
-            systemd_watchdog_key = "systemd_watchdog_seconds"
-        else:
-            systemd_watchdog_raw = nested_gateway.get("systemd_watchdog_seconds")
-            systemd_watchdog_key = "gateway.systemd_watchdog_seconds"
-        systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(
-            systemd_watchdog_raw, systemd_watchdog_key
-        )
-        if "loop_watchdog" in data:
-            loop_watchdog_raw = data.get("loop_watchdog")
-        else:
-            loop_watchdog_raw = nested_gateway.get("loop_watchdog")
-        loop_watchdog = _coerce_bool(loop_watchdog_raw, True)
-        if multiplex_profiles is None and isinstance(nested_gateway, dict):
-            # Also honor gateway.multiplex_profiles written by
-            # ``hermes config set gateway.multiplex_profiles true``.
-            multiplex_profiles = nested_gateway.get("multiplex_profiles")
-        # Operator override: GATEWAY_MULTIPLEX_PROFILES wins over config.yaml when
-        # set to a recognized value. Hosted deployments (Nous Portal / Fly) stamp
-        # it on the container so the single multiplexed gateway — which the
-        # connector now depends on for per-profile relay routing — is forced on at
-        # every boot regardless of the image's config.yaml, while self-hosted
-        # users keep setting gateway.multiplex_profiles in config.yaml. A blank or
-        # unrecognized env value falls through to config (the empty-secret trap:
-        # a provisioned-but-unpopulated Fly secret must not shadow config), so
-        # this is a genuine 3-tier chain: env > config.yaml > default False.
-        env_multiplex = _env_multiplex_profiles_override()
-        if env_multiplex is not None:
-            multiplex_profiles = env_multiplex
-        if "max_concurrent_sessions" in data:
-            max_concurrent_raw = data.get("max_concurrent_sessions")
-            max_concurrent_key = "max_concurrent_sessions"
-        else:
-            max_concurrent_raw = nested_gateway.get("max_concurrent_sessions")
-            max_concurrent_key = "gateway.max_concurrent_sessions"
-        max_concurrent_sessions = _coerce_optional_positive_int(
-            max_concurrent_raw,
-            max_concurrent_key,
-        )
-        unauthorized_dm_behavior = _normalize_unauthorized_dm_behavior(
-            data.get("unauthorized_dm_behavior"),
-            "pair",
-        )
-
-        try:
-            session_store_max_age_days = int(data.get("session_store_max_age_days", 90))
-            session_store_max_age_days = max(session_store_max_age_days, 0)
-        except (TypeError, ValueError):
-            session_store_max_age_days = 90
-
-        # Parse profile routes (validated by gateway.profile_routing)
-        from gateway.profile_routing import parse_profile_routes
-        profile_routes = parse_profile_routes(data.get("profile_routes") or [])
-
-        return cls(
-            platforms=platforms,
-            default_reset_policy=default_policy,
-            reset_by_type=reset_by_type,
-            reset_by_platform=reset_by_platform,
-            reset_triggers=data.get("reset_triggers", ["/new", "/reset"]),
-            quick_commands=quick_commands,
-            sessions_dir=sessions_dir,
-            write_sessions_json=_coerce_bool(data.get("write_sessions_json"), True),
-            always_log_local=_coerce_bool(data.get("always_log_local"), True),
-            filter_silence_narration=_coerce_bool(
-                data.get("filter_silence_narration"), True
-            ),
-            stt_enabled=_coerce_bool(stt_enabled, True),
-            stt_echo_transcripts=_coerce_bool(stt_echo_transcripts, True),
-            group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
-            thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
-            multiplex_profiles=_coerce_bool(multiplex_profiles, False),
-            systemd_watchdog_seconds=systemd_watchdog_seconds,
-            loop_watchdog=loop_watchdog,
-            max_concurrent_sessions=max_concurrent_sessions,
-            unauthorized_dm_behavior=unauthorized_dm_behavior,
-            streaming=StreamingConfig.from_dict(data.get("streaming", {})),
-            session_store_max_age_days=session_store_max_age_days,
-            profile_routes=profile_routes,
-        )
+        return self.model_dump(mode="json")
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
         """Return the effective unauthorized-DM behavior for a platform.
@@ -1290,7 +1173,7 @@ def load_gateway_config() -> GatewayConfig:
     3. ~/.hermes/gateway.json (legacy — provides defaults under config.yaml)
     4. Built-in defaults
     """
-    _home = get_hermes_home()
+    _home = _hermes_home()
     gw_data: dict = {}
 
     # Legacy fallback: gateway.json provides the base layer.
@@ -1309,19 +1192,17 @@ def load_gateway_config() -> GatewayConfig:
 
     # Primary source: config.yaml
     try:
-        from hermes_cli.config import _load_config_data_for_typed_model, load_gateway_typed_config
+        from hermes_cli.config import _load_config_data_for_typed_model
 
-        typed_gateway_cfg = load_gateway_typed_config()
-        typed_gateway_data = _canonical_typed_gateway_dump(typed_gateway_cfg)
         yaml_cfg = _load_config_data_for_typed_model(
             include_user_config=True,
             include_defaults=False,
+            config_path=_home / "config.yaml",
         )
-        if yaml_cfg:
-            gw_data.update(typed_gateway_data)
+    except FileNotFoundError:
+        yaml_cfg = {}
+    if yaml_cfg:
             gateway_section = yaml_cfg.setdefault("gateway", {})
-            if isinstance(gateway_section, dict):
-                gateway_section.update(typed_gateway_data)
 
             # Shared nested-fallback source: settings meant to be top-level
             # keys are also accepted when a user nests them under `gateway:`
@@ -1331,7 +1212,7 @@ def load_gateway_config() -> GatewayConfig:
             # write_sessions_json: top-level wins, nested gateway.* falls back.
             gateway_section = yaml_cfg.get("gateway")
 
-            # Map config.yaml keys → GatewayConfig.from_dict() schema.
+            # Map config.yaml keys → GatewayConfig schema.
             # Each key overwrites whatever gateway.json may have set.
             # Precedence contract: key-presence at the TOP LEVEL wins; the
             # nested gateway.* form is consulted only when the top-level key
@@ -1397,6 +1278,8 @@ def load_gateway_config() -> GatewayConfig:
                 if "multiplex_profiles" in gateway_section and "multiplex_profiles" not in gw_data:
                     # gateway.multiplex_profiles written by `hermes config set gateway.multiplex_profiles true`
                     gw_data["multiplex_profiles"] = gateway_section["multiplex_profiles"]
+                if "loop_watchdog" in gateway_section:
+                    gw_data["loop_watchdog"] = gateway_section["loop_watchdog"]
                 if "max_concurrent_sessions" in gateway_section:
                     gw_data["max_concurrent_sessions"] = gateway_section["max_concurrent_sessions"]
                 if "systemd_watchdog_seconds" in gateway_section:
@@ -1406,6 +1289,8 @@ def load_gateway_config() -> GatewayConfig:
 
             if "max_concurrent_sessions" in yaml_cfg:
                 gw_data["max_concurrent_sessions"] = yaml_cfg["max_concurrent_sessions"]
+            if "loop_watchdog" in yaml_cfg:
+                gw_data["loop_watchdog"] = yaml_cfg["loop_watchdog"]
 
             streaming_cfg = yaml_cfg.get("streaming")
             if not isinstance(streaming_cfg, dict) and isinstance(gateway_section, dict):
@@ -1678,7 +1563,7 @@ def load_gateway_config() -> GatewayConfig:
             # ``PlatformEntry.apply_yaml_config_fn`` for the hook contract.
             # Order: shared-key loop (above) → this dispatch → legacy hardcoded
             # blocks (below; no-op when a hook already set their env var) →
-            # ``_apply_env_overrides()`` after ``GatewayConfig.from_dict``.
+            # ``_apply_env_overrides()`` after ``GatewayConfig`` validation.
             if _pr is not None:
                 for entry in _pr.all_entries():
                     if entry.apply_yaml_config_fn is None:
@@ -1765,17 +1650,7 @@ def load_gateway_config() -> GatewayConfig:
             # apply_yaml_config_fn hook (plugins/platforms/feishu/adapter.py).
             # #41112 / #3823.
 
-            gw_data.update(typed_gateway_data)
-
-    except Exception as e:
-        logger.warning(
-            "Failed to process config.yaml — falling back to .env / gateway.json values. "
-            "Check %s for syntax errors. Error: %s",
-            _home / "config.yaml",
-            e,
-        )
-
-    config = GatewayConfig.from_dict(gw_data)
+    config = GatewayConfig.model_validate(gw_data)
 
     # Override with environment variables
     _apply_env_overrides(config)

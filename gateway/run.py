@@ -25763,7 +25763,7 @@ def main():
         import yaml
         with open(args.config, encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
-            config = GatewayConfig.from_dict(data)
+            config = GatewayConfig.model_validate(data)
     
     # start_gateway() performs the full graceful teardown (adapters
     # disconnected, sessions saved + flushed, SQLite closed, cron/MCP stopped,

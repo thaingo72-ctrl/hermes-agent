@@ -12,7 +12,7 @@ def test_positive_watchdog_config_generates_notify_unit(monkeypatch):
     monkeypatch.setattr(
         gateway_cli,
         "load_gateway_config",
-        lambda: GatewayConfig.from_dict({"systemd_watchdog_seconds": 120}),
+        lambda: GatewayConfig.model_validate({"systemd_watchdog_seconds": 120}),
         raising=False,
     )
 

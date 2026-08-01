@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import textwrap
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -99,6 +100,23 @@ class TestIgnoreUserConfigEnvGate:
         # User-set model.default MUST NOT leak through — either the built-in
         # default ("" or unset) or a project-level fallback, but never the
         # user's value
+        assert cfg["model"].get("default", "") != "test-vendor/ignore-user-config-sentinel"
+
+    def test_explicit_isolation_does_not_touch_user_config_source(self, tmp_path, monkeypatch):
+        self._write_user_config(tmp_path, "test-vendor/ignore-user-config-sentinel")
+        load_cli_config = self._reload_cli(monkeypatch, tmp_path)
+        user_config_path = tmp_path / "config.yaml"
+        real_exists = Path.exists
+        observed: list[Path] = []
+
+        def tracking_exists(path: Path) -> bool:
+            observed.append(path)
+            return real_exists(path)
+
+        monkeypatch.setattr(Path, "exists", tracking_exists)
+        cfg = load_cli_config(include_user_config=False)
+
+        assert user_config_path not in observed
         assert cfg["model"].get("default", "") != "test-vendor/ignore-user-config-sentinel"
 
     def test_flag_ignored_when_set_to_other_value(self, tmp_path, monkeypatch):

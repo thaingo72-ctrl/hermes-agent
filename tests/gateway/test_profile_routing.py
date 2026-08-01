@@ -1,6 +1,7 @@
 """Tests for gateway/profile_routing.py — profile-based routing."""
 
 import pytest
+from pydantic import ValidationError
 from gateway.profile_routing import (
     ProfileRoute,
     parse_profile_routes,
@@ -17,7 +18,7 @@ class TestProfileRoute:
 
     def test_frozen(self):
         r = ProfileRoute(name="x", platform="discord", profile="p")
-        with pytest.raises(AttributeError):
+        with pytest.raises(ValidationError):
             r.name = "y"
 
 

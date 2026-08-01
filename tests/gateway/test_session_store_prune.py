@@ -22,6 +22,7 @@ from unittest.mock import patch
 
 from gateway.config import GatewayConfig, Platform, SessionResetPolicy
 from gateway.session import SessionEntry, SessionStore
+from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 
 
 def test_session_store_default_db_uses_runtime_hermes_home(tmp_path, monkeypatch):
@@ -35,15 +36,24 @@ def test_session_store_default_db_uses_runtime_hermes_home(tmp_path, monkeypatch
     fake_home = tmp_path / "alt_hermes_home"
     fake_home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_home))
+    override_token = set_hermes_home_override(None)
+    import hermes_state
 
-    with patch("gateway.session.SessionStore._ensure_loaded"):
-        store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
+    monkeypatch.setattr(
+        hermes_state,
+        "DEFAULT_DB_PATH",
+        hermes_state._IMPORT_DEFAULT_DB_PATH,
+    )
 
     try:
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
+
         assert store._db is not None
         assert store._db.db_path == fake_home / "state.db"
     finally:
-        if store._db is not None:
+        reset_hermes_home_override(override_token)
+        if "store" in locals() and store._db is not None:
             store._db.close()
 
 
@@ -214,12 +224,12 @@ class TestGatewayConfigSerialization:
 
     def test_session_store_max_age_days_roundtrips(self):
         cfg = GatewayConfig(session_store_max_age_days=30)
-        restored = GatewayConfig.from_dict(cfg.to_dict())
+        restored = GatewayConfig.model_validate(cfg.to_dict())
         assert restored.session_store_max_age_days == 30
 
     def test_session_store_max_age_days_missing_defaults_90(self):
         """Loading an old config (pre-this-field) falls back to default."""
-        restored = GatewayConfig.from_dict({})
+        restored = GatewayConfig.model_validate({})
         assert restored.session_store_max_age_days == 90
 
 
@@ -258,4 +268,3 @@ class TestReadmeSentinel:
         # The note points users at the real store and command.
         assert "state.db" in raw["_README"]
         assert "hermes sessions list" in raw["_README"]
-

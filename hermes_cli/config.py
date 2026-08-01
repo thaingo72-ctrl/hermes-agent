@@ -33,6 +33,7 @@ from typing import Dict, Any, Optional, List, Tuple, Set
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from gateway.config import GatewayConfig
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.secret_prompt import masked_secret_prompt
 
@@ -992,43 +993,10 @@ class AgentConfigModel(_HermesConfigBase):
         return _coerce_strict_int(value)
 
 
-class GatewayProfileRouteModel(_HermesConfigBase):
-    name: str = ""
-    platform: str
-    profile: str
-    guild_id: Optional[str] = None
-    chat_id: Optional[str] = None
-    thread_id: Optional[str] = None
-    enabled: bool = True
-
-    @field_validator("enabled", mode="before")
-    @classmethod
-    def _coerce_enabled(cls, value: Any) -> Any:
-        return _coerce_strict_bool(value)
-
-
-class GatewayConfigModel(_HermesConfigBase):
-    loop_watchdog: bool = True
-    max_concurrent_sessions: Optional[int] = None
-    systemd_watchdog_seconds: int = 0
-    multiplex_profiles: bool = False
-    profile_routes: List[GatewayProfileRouteModel] = Field(default_factory=list)
-
-    @field_validator("loop_watchdog", "multiplex_profiles", mode="before")
-    @classmethod
-    def _coerce_bools(cls, value: Any) -> Any:
-        return _coerce_strict_bool(value)
-
-    @field_validator("max_concurrent_sessions", "systemd_watchdog_seconds", mode="before")
-    @classmethod
-    def _coerce_ints(cls, value: Any) -> Any:
-        return _coerce_strict_int(value)
-
-
 class HermesConfigModel(_HermesConfigBase):
     model: ModelConfigModel = Field(default_factory=ModelConfigModel)
     agent: AgentConfigModel = Field(default_factory=AgentConfigModel)
-    gateway: GatewayConfigModel = Field(default_factory=GatewayConfigModel)
+    gateway: GatewayConfig = Field(default_factory=GatewayConfig)
 
 # =============================================================================
 # Config Migration System
@@ -3293,13 +3261,10 @@ def load_typed_config(
 
 def load_gateway_typed_config(
     *, include_user_config: bool = True, config_path: Optional[Path] = None
-) -> GatewayConfigModel:
-    """Load only the canonical typed gateway slice.
+) -> "GatewayConfig":
+    """Load only the canonical typed gateway slice using the runtime model."""
+    from gateway.config import GatewayConfig
 
-    Gateway startup validates only the gateway-owned slice so a typo in an
-    unrelated section (for example ``agent.max_turns``) cannot discard valid
-    gateway settings during a long-running messaging process.
-    """
     data = _load_config_data_for_typed_model(
         include_user_config=include_user_config,
         config_path=config_path,
@@ -3307,31 +3272,7 @@ def load_gateway_typed_config(
     gateway_data = data.get("gateway") if isinstance(data.get("gateway"), dict) else {}
     if not isinstance(gateway_data, dict):
         gateway_data = {}
-    raw_data = read_user_config_raw(config_path) if include_user_config else {}
-    raw_gateway_data = (
-        raw_data.get("gateway") if isinstance(raw_data.get("gateway"), dict) else {}
-    )
-
-    merged: Dict[str, Any] = {}
-    for key in (
-        "loop_watchdog",
-        "max_concurrent_sessions",
-        "systemd_watchdog_seconds",
-        "multiplex_profiles",
-        "profile_routes",
-    ):
-        if key in raw_data:
-            merged[key] = data[key]
-        elif key in raw_gateway_data:
-            merged[key] = gateway_data[key]
-        elif key in data:
-            merged[key] = data[key]
-        elif key in gateway_data:
-            merged[key] = gateway_data[key]
-
-    for key, value in gateway_data.items():
-        merged.setdefault(key, value)
-    return GatewayConfigModel.model_validate(merged)
+    return GatewayConfig.model_validate(gateway_data)
 
 
 def write_platform_config_field(

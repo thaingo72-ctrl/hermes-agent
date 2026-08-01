@@ -10,13 +10,23 @@ to various messaging platforms (Telegram, Discord, WhatsApp, Weixin, and more) w
 """
 
 from .config import GatewayConfig, PlatformConfig, HomeChannel, load_gateway_config
-from .session import (
-    SessionContext,
-    SessionStore,
-    SessionResetPolicy,
-    build_session_context_prompt,
-)
-from .delivery import DeliveryRouter, DeliveryTarget
+
+
+def __getattr__(name):
+    if name in {
+        "SessionContext",
+        "SessionStore",
+        "SessionResetPolicy",
+        "build_session_context_prompt",
+    }:
+        from . import session
+
+        return getattr(session, name)
+    if name in {"DeliveryRouter", "DeliveryTarget"}:
+        from . import delivery
+
+        return getattr(delivery, name)
+    raise AttributeError(name)
 
 __all__ = [
     # Config

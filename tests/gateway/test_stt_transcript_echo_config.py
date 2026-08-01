@@ -6,7 +6,7 @@ from gateway.run import GatewayRunner
 
 
 def test_stt_echo_transcripts_defaults_on_for_backwards_compatibility():
-    cfg = GatewayConfig.from_dict({})
+    cfg = GatewayConfig.model_validate({})
 
     assert cfg.stt_enabled is True
     assert cfg.stt_echo_transcripts is True
@@ -14,7 +14,7 @@ def test_stt_echo_transcripts_defaults_on_for_backwards_compatibility():
 
 
 def test_top_level_stt_echo_transcripts_takes_precedence():
-    cfg = GatewayConfig.from_dict({
+    cfg = GatewayConfig.model_validate({
         "stt_echo_transcripts": False,
         "stt": {"echo_transcripts": True},
     })

@@ -72,7 +72,7 @@ class TestMultiplexConfigFlag:
 
 
     def test_from_dict_top_level(self):
-        cfg = GatewayConfig.from_dict({"multiplex_profiles": True})
+        cfg = GatewayConfig.model_validate({"multiplex_profiles": True})
         assert cfg.multiplex_profiles is True
 
 
