@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
+import agent.skill_commands
 from agent.secret_scope import (
     build_profile_secret_scope,
     reset_secret_scope,
@@ -34,8 +35,16 @@ from hermes_cli.env_loader import load_hermes_dotenv
 from utils import is_truthy_value
 from tools.environments.local import hermes_subprocess_env
 from agent.replay_cleanup import sanitize_replay_history
+from agent.skill_bundles import resolve_bundle_command_key
 from agent.skill_commands import describe_skill_invocation
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
+from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli.commands import resolve_command
+from hermes_cli.plugins import (
+    get_plugin_command_handler,
+    resolve_plugin_command_result,
+)
+from tools.approval import detect_dangerous_command, detect_hardline_command
 from tui_gateway import git_probe
 from tui_gateway.turn_marker import (
     clear_turn_marker,
@@ -11525,6 +11534,7 @@ from . import (  # noqa: E402
     methods_complete as _methods_complete,
     methods_config as _methods_config,
     methods_management as _methods_management,
+    methods_operations as _methods_operations,
     methods_prompt as _methods_prompt,
     methods_session as _methods_session,
     methods_session_lifecycle as _methods_session_lifecycle,
@@ -11828,6 +11838,54 @@ _methods_management.register(
         hermes_home=_hermes_home,
         load_enabled_toolsets=lambda: _load_enabled_toolsets(),
         reset_session_agent=lambda sid, session: _reset_session_agent(sid, session),
+    ),
+)
+
+_methods_operations.register(
+    _methods,
+    services=_methods_operations.OperationsServices(
+        slash=_methods_operations.SlashOperationsServices(
+            sess_nowait=_sess_nowait,
+            live_slash_command_output=_live_slash_command_output,
+            command_dispatch=lambda rid, params: _methods["command.dispatch"](
+                rid, params
+            ),
+            resolve_model=_resolve_model,
+            worker_factory=lambda *args, **kwargs: _SlashWorker(*args, **kwargs),
+            attach_worker=_attach_worker,
+            mirror_slash_side_effects=_mirror_slash_side_effects,
+            sessions_lock=_sessions_lock,
+            make_lock=threading.Lock,
+            pending_input_commands=_PENDING_INPUT_COMMANDS,
+            worker_blocked_commands=_WORKER_BLOCKED_COMMANDS,
+            resolve_bundle_command_key=resolve_bundle_command_key,
+            resolve_command=resolve_command,
+            get_skill_commands=lambda: agent.skill_commands.get_skill_commands(),
+            get_plugin_command_handler=get_plugin_command_handler,
+            resolve_plugin_command_result=resolve_plugin_command_result,
+        ),
+        insights=_methods_operations.InsightsOperationsServices(
+            get_db=_get_db,
+            db_unavailable_error=lambda rid: _db_unavailable_error(rid, code=5017),
+            time=time.time,
+        ),
+        rollback=_methods_operations.RollbackOperationsServices(
+            sess=_sess,
+            with_checkpoints=_with_checkpoints,
+            resolve_checkpoint_hash=_resolve_checkpoint_hash,
+            render_diff=render_diff,
+            sessions_lock=_sessions_lock,
+            make_lock=threading.Lock,
+        ),
+        shell=_methods_operations.ShellOperationsServices(
+            detect_hardline_command=detect_hardline_command,
+            detect_dangerous_command=detect_dangerous_command,
+            subprocess_run=lambda *args, **kwargs: subprocess.run(*args, **kwargs),
+            timeout_expired=subprocess.TimeoutExpired,
+            devnull=subprocess.DEVNULL,
+            getcwd=os.getcwd,
+            windows_hide_flags=windows_hide_flags,
+        ),
     ),
 )
 

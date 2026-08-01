@@ -35,7 +35,7 @@ def test_extracted_management_handlers_are_not_registered_by_legacy_tools_module
     legacy_names = {name for name, _handler in methods_tools._registry._pending}
 
     assert MANAGEMENT_METHODS.isdisjoint(legacy_names)
-    assert "shell.exec" in legacy_names
+    assert "shell.exec" not in legacy_names
 
 
 def test_concurrent_management_requests_keep_response_state_isolated(monkeypatch):
