@@ -4,10 +4,9 @@ Platform Adapter Registry
 Allows platform adapters (built-in and plugin) to self-register so the gateway
 can discover and instantiate them without hardcoded if/elif chains.
 
-Built-in adapters continue to use the existing if/elif in _create_adapter()
-for now.  Plugin adapters register here via PluginContext.register_platform()
-and are looked up first -- if nothing is found the gateway falls through to
-the legacy code path.
+Built-in adapters register here through PlatformEntry, the same shape plugins
+use via PluginContext.register_platform(). Plugin registrations keep override
+precedence over built-ins with the same platform name.
 
 Usage (plugin side):
 
@@ -326,6 +325,184 @@ class PlatformRegistry:
                 exc_info=True,
             )
             return None
+
+
+def _whatsapp_cloud_adapter_factory(config: Any) -> Optional[Any]:
+    from gateway.platforms.whatsapp_cloud import (
+        WhatsAppCloudAdapter,
+        check_whatsapp_cloud_requirements,
+    )
+
+    if not check_whatsapp_cloud_requirements():
+        logger.warning("WhatsApp Cloud: aiohttp/httpx missing — reinstall hermes-agent")
+        return None
+    return WhatsAppCloudAdapter(config)
+
+
+def _signal_adapter_factory(config: Any) -> Optional[Any]:
+    from gateway.platforms.signal import (
+        SignalAdapter,
+        check_signal_requirements,
+        validate_signal_config,
+    )
+
+    if not check_signal_requirements():
+        logger.warning("Signal: runtime requirements not met")
+        return None
+    if not validate_signal_config(config):
+        logger.warning("Signal: SIGNAL_HTTP_URL or SIGNAL_ACCOUNT not configured")
+        return None
+    return SignalAdapter(config)
+
+
+def _weixin_adapter_factory(config: Any) -> Optional[Any]:
+    from gateway.platforms.weixin import WeixinAdapter, check_weixin_requirements
+
+    if not check_weixin_requirements():
+        logger.warning("Weixin: aiohttp/cryptography not installed")
+        return None
+    return WeixinAdapter(config)
+
+
+def _api_server_adapter_factory(config: Any) -> Optional[Any]:
+    from gateway.platforms.api_server import APIServerAdapter, check_api_server_requirements
+
+    if not check_api_server_requirements():
+        logger.warning("API Server: aiohttp not installed")
+        return None
+    return APIServerAdapter(config)
+
+
+def _webhook_adapter_factory(config: Any) -> Optional[Any]:
+    from gateway.platforms.webhook import WebhookAdapter, check_webhook_requirements
+
+    if not check_webhook_requirements():
+        logger.warning("Webhook: aiohttp not installed")
+        return None
+    return WebhookAdapter(config)
+
+
+def _msgraph_webhook_adapter_factory(config: Any) -> Optional[Any]:
+    from gateway.platforms.msgraph_webhook import (
+        MSGraphWebhookAdapter,
+        check_msgraph_webhook_requirements,
+    )
+
+    if not check_msgraph_webhook_requirements():
+        logger.warning("MSGraph webhook: aiohttp not installed")
+        return None
+    return MSGraphWebhookAdapter(config)
+
+
+def _bluebubbles_adapter_factory(config: Any) -> Optional[Any]:
+    from gateway.platforms.bluebubbles import (
+        BlueBubblesAdapter,
+        check_bluebubbles_requirements,
+    )
+
+    if not check_bluebubbles_requirements():
+        logger.warning(
+            "BlueBubbles: aiohttp/httpx missing or "
+            "BLUEBUBBLES_SERVER_URL/BLUEBUBBLES_PASSWORD not configured"
+        )
+        return None
+    return BlueBubblesAdapter(config)
+
+
+def _qqbot_adapter_factory(config: Any) -> Optional[Any]:
+    from gateway.platforms.qqbot import QQAdapter, check_qq_requirements
+
+    if not check_qq_requirements():
+        logger.warning(
+            "QQBot: aiohttp/httpx missing or QQ_APP_ID/QQ_CLIENT_SECRET not configured"
+        )
+        return None
+    return QQAdapter(config)
+
+
+def _yuanbao_adapter_factory(config: Any) -> Optional[Any]:
+    from gateway.platforms.yuanbao import WEBSOCKETS_AVAILABLE, YuanbaoAdapter
+
+    if not WEBSOCKETS_AVAILABLE:
+        logger.warning("Yuanbao: websockets not installed. Run: pip install websockets")
+        return None
+    return YuanbaoAdapter(config)
+
+
+_BUILTIN_PLATFORM_ENTRIES: tuple[PlatformEntry, ...] = (
+    PlatformEntry(
+        name="whatsapp_cloud",
+        label="WhatsApp Cloud",
+        adapter_factory=_whatsapp_cloud_adapter_factory,
+        check_fn=lambda: True,
+        source="builtin",
+    ),
+    PlatformEntry(
+        name="signal",
+        label="Signal",
+        adapter_factory=_signal_adapter_factory,
+        check_fn=lambda: True,
+        source="builtin",
+    ),
+    PlatformEntry(
+        name="weixin",
+        label="Weixin",
+        adapter_factory=_weixin_adapter_factory,
+        check_fn=lambda: True,
+        source="builtin",
+    ),
+    PlatformEntry(
+        name="api_server",
+        label="API Server",
+        adapter_factory=_api_server_adapter_factory,
+        check_fn=lambda: True,
+        source="builtin",
+    ),
+    PlatformEntry(
+        name="webhook",
+        label="Webhook",
+        adapter_factory=_webhook_adapter_factory,
+        check_fn=lambda: True,
+        source="builtin",
+    ),
+    PlatformEntry(
+        name="msgraph_webhook",
+        label="MSGraph webhook",
+        adapter_factory=_msgraph_webhook_adapter_factory,
+        check_fn=lambda: True,
+        source="builtin",
+    ),
+    PlatformEntry(
+        name="bluebubbles",
+        label="BlueBubbles",
+        adapter_factory=_bluebubbles_adapter_factory,
+        check_fn=lambda: True,
+        source="builtin",
+    ),
+    PlatformEntry(
+        name="qqbot",
+        label="QQBot",
+        adapter_factory=_qqbot_adapter_factory,
+        check_fn=lambda: True,
+        source="builtin",
+    ),
+    PlatformEntry(
+        name="yuanbao",
+        label="Yuanbao",
+        adapter_factory=_yuanbao_adapter_factory,
+        check_fn=lambda: True,
+        source="builtin",
+    ),
+)
+
+
+def register_builtin_platforms(registry: Optional[PlatformRegistry] = None) -> None:
+    """Register built-in gateway adapters without overriding plugin entries."""
+    target = registry or platform_registry
+    for entry in _BUILTIN_PLATFORM_ENTRIES:
+        if target.is_registered(entry.name):
+            continue
+        target.register(entry)
 
 
 # Module-level singleton
