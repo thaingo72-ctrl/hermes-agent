@@ -13187,12 +13187,91 @@ from . import (  # noqa: E402
     methods_config as _methods_config,
     methods_prompt as _methods_prompt,
     methods_session as _methods_session,
+    methods_session_state as _methods_session_state,
     methods_tools as _methods_tools,
 )
 
 _methods_billing.register(
     _methods,
     services=_methods_billing.default_billing_services(emit=_emit),
+)
+_methods_session_state.register(
+    _methods,
+    services=_methods_session_state.SessionStateServices(
+        rpc=_methods_session_state.RpcServices(
+            ok=lambda rid, result: _ok(rid, result),
+            err=lambda rid, code, msg: _err(rid, code, msg),
+            db_unavailable_error=lambda rid, **kwargs: _db_unavailable_error(
+                rid, **kwargs
+            ),
+            emit=lambda event, sid, payload: _emit(event, sid, payload),
+            status_update=lambda sid, kind, text=None: _status_update(sid, kind, text),
+        ),
+        access=_methods_session_state.SessionAccessServices(
+            sess=lambda params, rid: _sess(params, rid),
+            sess_nowait=lambda params, rid: _sess_nowait(params, rid),
+            session_db=lambda session: _session_db(session),
+            profile_db=lambda params=None: _profile_db(params),
+            session_resume_lock=_session_resume_lock,
+            pop_session_by_id=lambda sid: _pop_session_by_id(sid),
+            teardown_popped_session=lambda session: _teardown_popped_session(
+                session, end_reason="tui_close"
+            ),
+        ),
+        view=_methods_session_state.SessionViewServices(
+            history_to_messages=lambda history: _history_to_messages(history),
+            metadata_mirror=lambda session: _metadata_mirror(session),
+            session_usage_snapshot=lambda session: _session_usage_snapshot(session),
+            project_info_for_cwd=lambda cwd: _project_info_for_cwd(cwd),
+            display_session_cwd=lambda session: _display_session_cwd(session),
+            session_info=lambda agent, session=None: _session_info(agent, session),
+        ),
+        compute=_methods_session_state.ComputeHostServices(
+            session_uses_compute_host=lambda session: _session_uses_compute_host(session),
+            send_compute_host_control=lambda sid, **kwargs: _send_compute_host_control(
+                sid, **kwargs
+            ),
+            apply_metadata_mirror=lambda session, frame: _apply_compute_host_metadata_mirror(
+                session, frame
+            ),
+            get_supervisor=lambda: _get_compute_host_supervisor(),
+        ),
+        compression=_methods_session_state.CompressionServices(
+            compress_session_history=lambda session, focus_topic, **kwargs: (
+                _compress_session_history(session, focus_topic, **kwargs)
+            ),
+            sync_session_key_after_compress=lambda sid, session: (
+                _sync_session_key_after_compress(sid, session)
+            ),
+            lock_held_error=CompressionLockHeld,
+        ),
+        branch=_methods_session_state.BranchServices(
+            new_session_key=lambda: _new_session_key(),
+            session_source=lambda session: _session_source(session),
+            resolve_model=lambda: _resolve_model(),
+            session_cwd=lambda session: _session_cwd(session),
+            make_agent=lambda *args, **kwargs: _make_agent(*args, **kwargs),
+            init_session=lambda *args, **kwargs: _init_session(*args, **kwargs),
+            sessions=_sessions,
+            set_session_context=lambda *args, **kwargs: _set_session_context(
+                *args, **kwargs
+            ),
+            clear_session_context=lambda tokens: _clear_session_context(tokens),
+            set_hermes_home_override=lambda home: set_hermes_home_override(home),
+            reset_hermes_home_override=lambda token: reset_hermes_home_override(token),
+        ),
+        interrupt=_methods_session_state.InterruptServices(
+            tts_stream_stop=lambda: _tts_stream_stop(),
+            clear_pending=lambda sid=None: _clear_pending(sid),
+            clear_inflight_turn=lambda session: _clear_inflight_turn(session),
+            resolve_gateway_approval=lambda *args, **kwargs: (
+                __import__(
+                    "tools.approval",
+                    fromlist=["resolve_gateway_approval"],
+                ).resolve_gateway_approval(*args, **kwargs)
+            ),
+        ),
+    ),
 )
 
 for _m in (
