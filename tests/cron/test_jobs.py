@@ -79,6 +79,25 @@ class TestParseSchedule:
         assert result["kind"] == "cron"
         assert result["expr"] == "0 9 * * *"
 
+    def test_cron_expression_accepts_iana_timezone_prefix(self):
+        pytest.importorskip("croniter")
+        result = parse_schedule("TZ=Asia/Ho_Chi_Minh 30 6 * * 1-5")
+        assert result == {
+            "kind": "cron",
+            "expr": "30 6 * * 1-5",
+            "timezone": "Asia/Ho_Chi_Minh",
+            "display": "TZ=Asia/Ho_Chi_Minh 30 6 * * 1-5",
+        }
+
+    def test_cron_expression_rejects_invalid_timezone_prefix(self):
+        pytest.importorskip("croniter")
+        with pytest.raises(ValueError, match="Invalid timezone"):
+            parse_schedule("TZ=Not/A_Zone 30 6 * * 1-5")
+
+    def test_timezone_prefix_rejects_non_cron_schedule(self):
+        with pytest.raises(ValueError, match="only supported for cron expressions"):
+            parse_schedule("TZ=Asia/Ho_Chi_Minh every 2h")
+
     def test_iso_timestamp(self):
         result = parse_schedule("2030-01-15T14:00:00")
         assert result["kind"] == "once"
@@ -136,6 +155,80 @@ class TestNaiveScheduleTimezoneDivergence:
             f"one-shot should be due; next_run_at={job['next_run_at']}"
         )
 
+    def test_per_job_timezone_cron_becomes_due_in_configured_timezone(self, tmp_cron_dir, monkeypatch):
+        pytest.importorskip("croniter")
+        from zoneinfo import ZoneInfo
+
+        pacific = ZoneInfo("America/Los_Angeles")
+        clock = [datetime(2026, 7, 31, 22, 0, tzinfo=pacific)]
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: clock[0])
+        job = create_job(
+            prompt="Saigon brief",
+            schedule="TZ=Asia/Ho_Chi_Minh 30 6 * * 1-5",
+            deliver="local",
+        )
+
+        clock[0] = datetime(2026, 8, 2, 16, 30, tzinfo=pacific)
+        due = get_due_jobs()
+        assert [candidate["id"] for candidate in due] == [job["id"]]
+
+    def test_per_job_timezone_due_check_uses_absolute_time_during_second_fold(
+        self, tmp_cron_dir, monkeypatch
+    ):
+        from zoneinfo import ZoneInfo
+
+        eastern = ZoneInfo("America/New_York")
+        scheduled = datetime(2026, 11, 1, 1, 30, tzinfo=eastern, fold=0)
+        now = datetime(2026, 11, 1, 1, 15, tzinfo=eastern, fold=1)
+        save_jobs([
+            {
+                "id": "fold-due",
+                "name": "fold-due",
+                "prompt": "test",
+                "schedule": {
+                    "kind": "cron",
+                    "expr": "30 1 * * *",
+                    "timezone": "America/New_York",
+                    "display": "TZ=America/New_York 30 1 * * *",
+                },
+                "next_run_at": scheduled.isoformat(),
+                "repeat": {"times": None, "completed": 0},
+                "delivery": {"platform": "local"},
+                "enabled": True,
+            }
+        ])
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        due = get_due_jobs()
+        assert [candidate["id"] for candidate in due] == ["fold-due"]
+
+    def test_oneshot_recovery_uses_absolute_time_during_second_fold(
+        self, tmp_cron_dir, monkeypatch
+    ):
+        from zoneinfo import ZoneInfo
+
+        eastern = ZoneInfo("America/New_York")
+        scheduled = datetime(2026, 11, 1, 1, 30, tzinfo=eastern, fold=0)
+        now = datetime(2026, 11, 1, 1, 15, tzinfo=eastern, fold=1)
+        save_jobs([
+            {
+                "id": "fold-oneshot",
+                "name": "fold-oneshot",
+                "prompt": "test",
+                "schedule": {
+                    "kind": "once",
+                    "run_at": scheduled.isoformat(),
+                    "display": "once during fold zero",
+                },
+                "repeat": {"times": 1, "completed": 0},
+                "delivery": {"platform": "local"},
+                "enabled": True,
+            }
+        ])
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: now)
+
+        assert get_due_jobs() == []
+
 
 # =========================================================================
 # compute_next_run
@@ -172,6 +265,127 @@ class TestComputeNextRun:
         next_dt = datetime.fromisoformat(result)
         # Should be ~60 minutes from now
         assert next_dt > datetime.now().astimezone() + timedelta(minutes=59)
+
+    def test_cron_timezone_preserves_saigon_wall_clock_across_pacific_dst(self, monkeypatch):
+        pytest.importorskip("croniter")
+        from zoneinfo import ZoneInfo
+
+        schedule = {
+            "kind": "cron",
+            "expr": "30 6 * * 1-5",
+            "timezone": "Asia/Ho_Chi_Minh",
+        }
+        pacific = ZoneInfo("America/Los_Angeles")
+
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(2026, 7, 31, 22, 0, tzinfo=pacific),
+        )
+        summer_value = compute_next_run(schedule)
+        assert summer_value is not None
+        summer = datetime.fromisoformat(summer_value)
+        assert summer.isoformat() == "2026-08-03T06:30:00+07:00"
+        assert summer.astimezone(pacific).isoformat() == "2026-08-02T16:30:00-07:00"
+
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(2026, 11, 1, 12, 0, tzinfo=pacific),
+        )
+        winter_value = compute_next_run(schedule)
+        assert winter_value is not None
+        winter = datetime.fromisoformat(winter_value)
+        assert winter.isoformat() == "2026-11-02T06:30:00+07:00"
+        assert winter.astimezone(pacific).isoformat() == "2026-11-01T15:30:00-08:00"
+
+    def test_cron_timezone_skips_nonexistent_spring_wall_time(self, monkeypatch):
+        pytest.importorskip("croniter")
+        from zoneinfo import ZoneInfo
+
+        eastern = ZoneInfo("America/New_York")
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(2026, 3, 7, 3, 0, tzinfo=eastern),
+        )
+        value = compute_next_run({
+            "kind": "cron",
+            "expr": "30 2 * * *",
+            "timezone": "America/New_York",
+        })
+        assert value is not None
+        assert value == "2026-03-09T02:30:00-04:00"
+
+    def test_cron_timezone_per_second_schedule_jumps_spring_gap(self, monkeypatch):
+        pytest.importorskip("croniter")
+        from zoneinfo import ZoneInfo
+
+        eastern = ZoneInfo("America/New_York")
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(2026, 3, 8, 1, 59, 59, tzinfo=eastern),
+        )
+        value = compute_next_run({
+            "kind": "cron",
+            "expr": "* * * * * *",
+            "timezone": "America/New_York",
+        })
+        assert value == "2026-03-08T03:00:00-04:00"
+
+    def test_cron_timezone_per_second_schedule_jumps_second_fold(self, monkeypatch):
+        pytest.importorskip("croniter")
+        from zoneinfo import ZoneInfo
+
+        eastern = ZoneInfo("America/New_York")
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(
+                2026, 11, 1, 1, 15, 0, 123000, tzinfo=eastern, fold=1
+            ),
+        )
+        value = compute_next_run({
+            "kind": "cron",
+            "expr": "* * * * * *",
+            "timezone": "America/New_York",
+        })
+        assert value == "2026-11-01T02:00:00-05:00"
+
+    def test_cron_timezone_fall_back_fires_once_at_stable_wall_time(self, monkeypatch):
+        pytest.importorskip("croniter")
+        from zoneinfo import ZoneInfo
+
+        eastern = ZoneInfo("America/New_York")
+        schedule = {
+            "kind": "cron",
+            "expr": "30 1 * * *",
+            "timezone": "America/New_York",
+        }
+        monkeypatch.setattr(
+            "cron.jobs._hermes_now",
+            lambda: datetime(2026, 10, 31, 3, 0, tzinfo=eastern),
+        )
+        first_value = compute_next_run(schedule)
+        assert first_value is not None
+        first = datetime.fromisoformat(first_value)
+        assert first.isoformat() == "2026-11-01T01:30:00-04:00"
+
+        second_value = compute_next_run(schedule, last_run_at=first_value)
+        assert second_value is not None
+        assert second_value == "2026-11-02T01:30:00-05:00"
+
+    def test_cron_timezone_second_fold_never_returns_past_first_fold(self, monkeypatch):
+        pytest.importorskip("croniter")
+        from zoneinfo import ZoneInfo
+
+        eastern = ZoneInfo("America/New_York")
+        second_fold_base = datetime(2026, 11, 1, 1, 15, tzinfo=eastern, fold=1)
+        monkeypatch.setattr("cron.jobs._hermes_now", lambda: second_fold_base)
+        value = compute_next_run({
+            "kind": "cron",
+            "expr": "30 1 * * *",
+            "timezone": "America/New_York",
+        })
+        assert value is not None
+        assert value == "2026-11-02T01:30:00-05:00"
+        assert datetime.fromisoformat(value) > second_fold_base
 
 
 # =========================================================================

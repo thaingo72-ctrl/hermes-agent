@@ -31,8 +31,9 @@ try:
     import msvcrt
 except ImportError:  # pragma: no cover - non-Windows
     msvcrt = None
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from hermes_constants import get_hermes_home
 from typing import Optional, Dict, List, Any, Set, Tuple, Union
 
@@ -569,7 +570,7 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
         - kind: "once" | "interval" | "cron"
         - For "once": "run_at" (ISO timestamp)
         - For "interval": "minutes" (int)
-        - For "cron": "expr" (cron expression)
+        - For "cron": "expr" (cron expression) and optional "timezone"
     
     Examples:
         "30m"              → once in 30 minutes
@@ -577,11 +578,27 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
         "every 30m"        → recurring every 30 minutes
         "every 2h"         → recurring every 2 hours
         "0 9 * * *"        → cron expression
+        "TZ=Asia/Tokyo 0 9 * * *" → timezone-pinned cron expression
         "2026-02-03T14:00" → once at timestamp
     """
     schedule = schedule.strip()
     original = schedule
+    timezone_name = None
+    timezone_match = re.match(r"^TZ=([^\s]+)\s+(.+)$", schedule, re.IGNORECASE)
+    if timezone_match:
+        timezone_name = timezone_match.group(1)
+        try:
+            ZoneInfo(timezone_name)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"Invalid timezone '{timezone_name}'") from exc
+        schedule = timezone_match.group(2).strip()
     schedule_lower = schedule.lower()
+    if timezone_name:
+        timezone_parts = schedule.split()
+        if len(timezone_parts) < 5 or not all(
+            re.match(r'^[\d\*\-,/]+$', part) for part in timezone_parts[:5]
+        ):
+            raise ValueError("Timezone prefixes are only supported for cron expressions")
     
     # "every X" pattern → recurring interval
     if schedule_lower.startswith("every "):
@@ -606,11 +623,14 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
             croniter(schedule)
         except Exception as e:
             raise ValueError(f"Invalid cron expression '{schedule}': {e}")
-        return {
+        result = {
             "kind": "cron",
             "expr": schedule,
-            "display": schedule
+            "display": original,
         }
+        if timezone_name:
+            result["timezone"] = timezone_name
+        return result
     
     # ISO timestamp (contains T or looks like date)
     if 'T' in schedule or re.match(r'^\d{4}-\d{2}-\d{2}', schedule):
@@ -730,7 +750,9 @@ def _recoverable_oneshot_run_at(
         run_at_dt = _ensure_aware(datetime.fromisoformat(run_at))
     except Exception:
         return None
-    if run_at_dt >= now - timedelta(seconds=ONESHOT_GRACE_SECONDS):
+    run_at_utc = run_at_dt.astimezone(timezone.utc)
+    now_utc = now.astimezone(timezone.utc)
+    if run_at_utc >= now_utc - timedelta(seconds=ONESHOT_GRACE_SECONDS):
         return run_at
     return None
 
@@ -767,6 +789,72 @@ def _compute_grace_seconds(schedule: dict) -> int:
                 pass
 
     return MIN_GRACE
+
+
+def _localize_cron_wall_time(local_time: datetime, tz: ZoneInfo) -> Optional[datetime]:
+    """Attach ``tz`` to a naive cron wall time, rejecting nonexistent times.
+
+    ``zoneinfo`` accepts imaginary spring-forward values without raising.  A
+    UTC round trip is the reliable validity check.  Ambiguous fall-back values
+    intentionally use ``fold=0`` so a wall-clock cron occurrence fires once.
+    """
+    for fold in (0, 1):
+        candidate = local_time.replace(tzinfo=tz, fold=fold)
+        round_trip = candidate.astimezone(timezone.utc).astimezone(tz)
+        if round_trip.replace(tzinfo=None) == local_time:
+            return candidate
+    return None
+
+
+def _first_valid_wall_time_after_gap(
+    local_time: datetime, tz: ZoneInfo
+) -> Optional[datetime]:
+    """Return the first normalized wall time after a nonexistent local time."""
+    forward = []
+    for fold in (0, 1):
+        candidate = local_time.replace(tzinfo=tz, fold=fold)
+        normalized = candidate.astimezone(timezone.utc).astimezone(tz)
+        normalized_wall = normalized.replace(tzinfo=None)
+        if normalized_wall > local_time:
+            forward.append(normalized_wall)
+    return min(forward) if forward else None
+
+
+def _is_ambiguous_wall_time(local_time: datetime, tz: ZoneInfo) -> bool:
+    """Return whether a naive local wall time occurs in both DST folds."""
+    valid = []
+    for fold in (0, 1):
+        candidate = local_time.replace(tzinfo=tz, fold=fold)
+        round_trip = candidate.astimezone(timezone.utc).astimezone(tz)
+        if round_trip.replace(tzinfo=None) == local_time:
+            valid.append(candidate)
+    return len(valid) == 2 and valid[0].utcoffset() != valid[1].utcoffset()
+
+
+def _first_unambiguous_wall_time_after_fold(
+    local_time: datetime, tz: ZoneInfo
+) -> Optional[datetime]:
+    """Find the first whole-second wall time after a repeated-time interval."""
+    if not _is_ambiguous_wall_time(local_time, tz):
+        return None
+    local_time = local_time.replace(microsecond=0)
+    low = 0
+    high = 1
+    max_seconds = 172800
+    while high <= max_seconds and _is_ambiguous_wall_time(
+        local_time + timedelta(seconds=high), tz
+    ):
+        low = high
+        high *= 2
+    if high > max_seconds:
+        return None
+    while low + 1 < high:
+        mid = (low + high) // 2
+        if _is_ambiguous_wall_time(local_time + timedelta(seconds=mid), tz):
+            low = mid
+        else:
+            high = mid
+    return local_time + timedelta(seconds=high)
 
 
 def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None) -> Optional[str]:
@@ -814,6 +902,7 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
                 expr,
             )
             return None
+        assert croniter is not None
         # Use last_run_at as the croniter base when available, consistent
         # with interval jobs.  This ensures that after a crash/restart,
         # the next run is anchored to the actual last execution time
@@ -824,9 +913,66 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
                 base_time = _ensure_aware(datetime.fromisoformat(last_run_at))
             except Exception:
                 base_time = now
-        cron = croniter(expr, base_time)
-        next_run = cron.get_next(datetime)
-        return next_run.isoformat()
+        timezone_name = schedule.get("timezone")
+        if not timezone_name:
+            cron = croniter(expr, base_time)
+            next_run = cron.get_next(datetime)
+            return next_run.isoformat()
+
+        try:
+            job_tz = ZoneInfo(timezone_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            logger.warning(
+                "Cannot compute next run for cron schedule %r: invalid timezone %r",
+                expr,
+                timezone_name,
+            )
+            return None
+
+        # croniter's aware-datetime DST arithmetic can shift later wall-clock
+        # occurrences.  Iterate on naive job-local wall time, then localize each
+        # candidate explicitly.  Skip nonexistent spring-forward occurrences;
+        # ambiguous fall-back occurrences resolve once at fold=0.
+        job_base = base_time.astimezone(job_tz)
+        wall_base = job_base.replace(tzinfo=None)
+        if job_base.fold == 1:
+            first_unambiguous = _first_unambiguous_wall_time_after_fold(
+                wall_base, job_tz
+            )
+            if first_unambiguous is not None:
+                # Ambiguous wall times already fired in fold=0. Start just
+                # before the first unambiguous second so per-second schedules
+                # jump directly to it instead of scanning the repeated hour.
+                wall_base = first_unambiguous - timedelta(microseconds=1)
+        cron = croniter(expr, wall_base)
+        for _ in range(400):
+            wall_candidate = cron.get_next(datetime)
+            next_run = _localize_cron_wall_time(wall_candidate, job_tz)
+            if (
+                next_run is not None
+                and next_run.astimezone(timezone.utc)
+                > base_time.astimezone(timezone.utc)
+            ):
+                return next_run.isoformat()
+            if next_run is None:
+                # Jump across the whole imaginary interval instead of walking
+                # candidate-by-candidate. This is load-bearing for supported
+                # six-field per-second expressions (a one-hour DST gap contains
+                # 3,600 otherwise-invalid candidates).
+                first_valid_wall = _first_valid_wall_time_after_gap(
+                    wall_candidate, job_tz
+                )
+                if first_valid_wall is not None:
+                    cron = croniter(
+                        expr, first_valid_wall - timedelta(microseconds=1)
+                    )
+        logger.warning(
+            "Cannot compute next run for cron schedule %r in timezone %r: "
+            "no valid wall-clock occurrence found",
+            expr,
+            timezone_name,
+        )
+        return None
 
     return None
 
@@ -2008,7 +2154,10 @@ def claim_job_for_fire(job_id: str, *, claim_ttl_seconds: int = 300) -> bool:
                     # "fresh" forever — the job becomes permanently unfireable
                     # and every manual `cron run` reports "already being
                     # fired". Treat future-dated claims as stale/overwritable.
-                    _age = (now - claimed_at).total_seconds()
+                    _age = (
+                        now.astimezone(timezone.utc)
+                        - claimed_at.astimezone(timezone.utc)
+                    ).total_seconds()
                     if 0 <= _age < claim_ttl_seconds:
                         return False  # someone holds a fresh claim
                 except Exception:
@@ -2045,6 +2194,7 @@ def get_due_jobs() -> List[Dict[str, Any]]:
 def _get_due_jobs_locked() -> List[Dict[str, Any]]:
     """Inner implementation of get_due_jobs(); must be called with _jobs_lock held."""
     now = _hermes_now()
+    now_utc = now.astimezone(timezone.utc)
     raw_jobs = load_jobs()
     needs_save = False
 
@@ -2170,7 +2320,9 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                     # 0 <= age: a future-dated claim (clock/TZ skew across a
                     # restart) must be treated as stale, not eternally fresh,
                     # or the one-shot is skipped forever (#60703).
-                    _age = (now - claimed_at).total_seconds()
+                    _age = (
+                        now_utc - claimed_at.astimezone(timezone.utc)
+                    ).total_seconds()
                     if 0 <= _age < _run_claim_ttl:
                         continue  # a fresh claim is held by an in-flight run
                 except (KeyError, ValueError, TypeError):
@@ -2221,6 +2373,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             kind = schedule.get("kind")
 
             next_run_dt = _ensure_aware(raw_next_run_dt)
+            next_run_utc = next_run_dt.astimezone(timezone.utc)
             # Migration repair: a cron job persists next_run_at as an absolute
             # instant, but the cron expr describes local wall-clock intent. If the
             # configured/system timezone changed after persistence, the stored
@@ -2236,9 +2389,13 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             # the recompute lands on the same wall-clock time later the same period,
             # and DST-boundary collisions with a still-future stored wall clock are
             # rare relative to the double-fire bug this prevents (#28934).
+            # A per-job timezone intentionally differs from the configured
+            # scheduler timezone, so it must never enter this migration-only
+            # offset-repair branch.
             if (
                 kind == "cron"
-                and next_run_dt <= now
+                and not schedule.get("timezone")
+                and next_run_utc <= now_utc
                 and _timezone_offset_mismatch(raw_next_run_dt, now)
                 and _stored_wall_clock_is_future(raw_next_run_dt, now)
             ):
@@ -2259,13 +2416,16 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                             break
                     continue
 
-            if next_run_dt <= now:
+            if next_run_utc <= now_utc:
 
                 # For recurring jobs, check if the scheduled time is stale
                 # (gateway was down and missed the window). Fast-forward to
                 # the next future occurrence instead of firing a stale run.
                 grace = _compute_grace_seconds(schedule)
-                if kind in {"cron", "interval"} and (now - next_run_dt).total_seconds() > grace:
+                if (
+                    kind in {"cron", "interval"}
+                    and (now_utc - next_run_utc).total_seconds() > grace
+                ):
                     # Job is past its catch-up grace window — skip accumulated
                     # missed runs but still execute once now to avoid deferring
                     # indefinitely (e.g. a long-running job just finished).

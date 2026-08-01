@@ -67,6 +67,17 @@ Every morning at 9am, check Hacker News for AI news and send me a summary on Tel
 
 Hermes will use the unified `cronjob` tool internally.
 
+### Pinning a cron expression to an IANA timezone
+
+Prefix a cron expression with `TZ=<IANA zone>` when its wall-clock time must remain fixed even if the Hermes host uses another timezone or changes daylight-saving offset:
+
+```bash
+hermes cron create "TZ=Asia/Ho_Chi_Minh 30 6 * * 1-5" \
+  "Send the weekday 6:30 AM Saigon brief"
+```
+
+The timezone applies only to that cron expression. Stored next-run timestamps remain timezone-aware, and the scheduler compares them as absolute instants. At daylight-saving transitions, nonexistent spring-forward wall times are skipped and ambiguous fall-back wall times fire once at the first occurrence. Invalid IANA timezone names are rejected at creation or update time. Interval and one-shot schedules continue to use the configured Hermes timezone.
+
 ## Letting unpinned jobs track global defaults
 
 The model/provider drift guard is enabled by default. If your unpinned cron
