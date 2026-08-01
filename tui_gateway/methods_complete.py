@@ -1,18 +1,41 @@
-"""Completion / model-key / paste JSON-RPC handlers (moved verbatim from server.py).
+"""Completion, model picker, and paste JSON-RPC handlers for the TUI gateway."""
 
-Handler bodies are byte-identical to their pre-split server.py form; they
-are rebound onto server.py's globals at install time — see method_ctx.py.
-"""
+from __future__ import annotations
 
-from .method_ctx import HandlerRegistry
+import logging
+import os
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, MutableMapping
 
-_registry = HandlerRegistry()
-method = _registry.method
-_profile_scoped = _registry.profile_scoped
+logger = logging.getLogger(__name__)
 
 
-@method("paste.collapse")
-def _(rid, params: dict) -> dict:
+@dataclass(frozen=True)
+class CompletionServices:
+    sessions: MutableMapping[str, dict]
+    hermes_home: Callable[[], Path]
+    profile_home: Callable[[str | None], Path | None]
+    load_cfg: Callable[[], dict]
+    apply_managed: Callable[[dict], dict]
+    resolve_model: Callable[[], str]
+
+
+def _ok(rid, result: dict) -> dict:
+    return {"jsonrpc": "2.0", "id": rid, "result": result}
+
+
+def _err(rid, code: int, msg: str) -> dict:
+    return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": msg}}
+
+
+_paste_counter = 0
+
+
+def paste_collapse(rid, params: dict, services: CompletionServices) -> dict:
     global _paste_counter
     text = params.get("text", "")
     if not text:
@@ -20,7 +43,7 @@ def _(rid, params: dict) -> dict:
 
     _paste_counter += 1
     line_count = text.count("\n") + 1
-    paste_dir = _hermes_home / "pastes"
+    paste_dir = services.hermes_home() / "pastes"
     paste_dir.mkdir(parents=True, exist_ok=True)
 
     from datetime import datetime
@@ -38,15 +61,14 @@ def _(rid, params: dict) -> dict:
     )
 
 
-@method("complete.path")
-def _(rid, params: dict) -> dict:
+def complete_path(rid, params: dict, services: CompletionServices) -> dict:
     word = params.get("word", "")
     if not word:
         return _ok(rid, {"items": []})
 
     items: list[dict] = []
     try:
-        root = _completion_cwd(params)
+        root = _completion_cwd(params, services)
         is_context = word.startswith("@")
         query = word[1:] if is_context else word
 
@@ -215,8 +237,7 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"items": items})
 
 
-@method("complete.slash")
-def _(rid, params: dict) -> dict:
+def complete_slash(rid, params: dict, services: CompletionServices) -> dict:
     text = params.get("text", "")
     if not text.startswith("/"):
         return _ok(rid, {"items": []})
@@ -237,7 +258,7 @@ def _(rid, params: dict) -> dict:
         # Skill commands and bundles are the only completions offered for an
         # inline `/skill` reference typed mid-message, so the class has to
         # reach the TUI as data. Derived from the same providers the completer
-        # uses — no sniffing the ⚡/▣ meta glyphs, which are display text.
+        # uses; display glyphs are not protocol data.
         skill_names = {
             key.lstrip("/").lower()
             for key in (*get_skill_commands(), *get_skill_bundles())
@@ -324,18 +345,17 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5020, str(e))
 
 
-@method("model.options")
-def _(rid, params: dict) -> dict:
+def model_options(rid, params: dict, services: CompletionServices) -> dict:
     try:
         from hermes_cli.inventory import build_model_options_payload
 
-        session = _sessions.get(params.get("session_id", ""))
+        session = services.sessions.get(params.get("session_id", ""))
         agent = session.get("agent") if session else None
         # Layer agent-session state on top of disk config — once an agent
         # is spawned, IT owns the live provider/model/base_url. Empty
         # agent attributes must NOT clobber disk config (with_overrides
         # is truthy-only).
-        ctx = _model_picker_context(agent)
+        ctx = _model_picker_context(agent, services)
         payload = build_model_options_payload(
             ctx,
             explicit_only=bool(params.get("explicit_only")),
@@ -347,8 +367,7 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5033, str(e))
 
 
-@method("model.save_key")
-def _(rid, params: dict) -> dict:
+def model_save_key(rid, params: dict, services: CompletionServices) -> dict:
     """Save an API key for a provider, then return its refreshed model list.
 
     Params:
@@ -400,9 +419,9 @@ def _(rid, params: dict) -> dict:
         # surface stays in lock-step with model.options + dashboard
         # /api/model/options. picker_hints=True ensures the returned row
         # carries `authenticated` for the TUI frontend.
-        session = _sessions.get(params.get("session_id", ""))
+        session = services.sessions.get(params.get("session_id", ""))
         agent = session.get("agent") if session else None
-        ctx = _model_picker_context(agent)
+        ctx = _model_picker_context(agent, services)
         payload = build_models_payload(
             ctx, picker_hints=True, max_models=50,
         )
@@ -427,8 +446,7 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5034, str(e))
 
 
-@method("model.disconnect")
-def _(rid, params: dict) -> dict:
+def model_disconnect(rid, params: dict, services: CompletionServices) -> dict:
     """Remove credentials for a provider.
 
     Params:
@@ -479,6 +497,467 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5035, str(e))
 
 
-def register(server) -> None:
-    """Bind this module's handlers onto ``server``'s globals and registry."""
-    _registry.install(server)
+_CWD_PLACEHOLDERS = {".", "auto", "cwd"}
+
+
+def _configured_cwd_from_cfg(cfg: dict | None) -> str | None:
+    if not isinstance(cfg, dict):
+        return None
+    terminal_cfg = cfg.get("terminal")
+    if not isinstance(terminal_cfg, dict):
+        return None
+    raw = str(terminal_cfg.get("cwd") or "").strip()
+    if not raw or raw in _CWD_PLACEHOLDERS:
+        return None
+    resolved = os.path.abspath(os.path.expanduser(raw))
+    return resolved if os.path.isdir(resolved) else None
+
+
+def _profile_configured_cwd(
+    profile_home: Path | None, services: CompletionServices
+) -> str | None:
+    if profile_home is None:
+        return None
+    try:
+        from hermes_cli.config import _expand_env_vars, read_user_config_raw
+
+        p = Path(profile_home) / "config.yaml"
+        if not p.exists():
+            return None
+        data = services.apply_managed(read_user_config_raw(p))
+        expanded = _expand_env_vars(data)
+        if isinstance(expanded, dict):
+            data = expanded
+        return _configured_cwd_from_cfg(data)
+    except Exception:
+        return None
+
+
+def _launch_configured_cwd(services: CompletionServices) -> str | None:
+    try:
+        return _configured_cwd_from_cfg(services.load_cfg())
+    except Exception:
+        return None
+
+
+def _normalize_completion_path(path_part: str) -> str:
+    expanded = os.path.expanduser(path_part)
+    if os.name != "nt":
+        normalized = expanded.replace("\\", "/")
+        if (
+            len(normalized) >= 3
+            and normalized[1] == ":"
+            and normalized[2] == "/"
+            and normalized[0].isalpha()
+        ):
+            return f"/mnt/{normalized[0].lower()}/{normalized[3:]}"
+    return expanded
+
+
+def _completion_cwd(
+    params: dict | None = None, services: CompletionServices | None = None
+) -> str:
+    if services is None:
+        services = _standalone_services()
+    params = params or {}
+    raw = (
+        params.get("cwd")
+        or services.sessions.get(params.get("session_id") or "", {}).get("cwd")
+        or _profile_configured_cwd(services.profile_home(params.get("profile")), services)
+        or _launch_configured_cwd(services)
+        or os.environ.get("TERMINAL_CWD")
+        or os.getcwd()
+    )
+    try:
+        resolved = os.path.abspath(os.path.expanduser(str(raw)))
+        if os.path.isdir(resolved):
+            return resolved
+    except Exception:
+        pass
+    return os.getcwd()
+
+
+def _skill_usage_lookup():
+    try:
+        from tools.skill_usage import (
+            _read_bundled_manifest_names,
+            _read_hub_installed_names,
+            activity_count,
+            load_usage,
+        )
+
+        records = load_usage()
+        bundled = _read_bundled_manifest_names()
+        hub = _read_hub_installed_names()
+    except Exception as e:
+        logger.debug("skill usage lookup unavailable: %s", e)
+        return (lambda _name: 0), (lambda _name: "local")
+
+    def usage(name: str) -> int:
+        try:
+            return activity_count(records.get(name) or {})
+        except Exception:
+            return 0
+
+    def origin(name: str) -> str:
+        if name in hub:
+            return "hub"
+        if name in bundled:
+            return "bundled"
+        return "local"
+
+    return usage, origin
+
+
+_SLASH_COMPLETION_LIMIT = 30
+
+
+def _rank_slash_completions(
+    items: list[dict],
+    usage,
+    origin_of,
+    *,
+    browsing: bool,
+) -> list[dict]:
+    """Rank slash completions while preserving registry-command order."""
+
+    def name_of(item: dict) -> str:
+        return str(item.get("text", "")).strip().lstrip("/").lower()
+
+    commands = [item for item in items if item.get("kind") != "skill"]
+    skills = [item for item in items if item.get("kind") == "skill"]
+
+    if browsing:
+        skills = [
+            item
+            for item in skills
+            if origin_of(name_of(item)) != "bundled" or usage(name_of(item)) > 0
+        ]
+
+    skills.sort(key=lambda item: (-usage(name_of(item)), name_of(item)))
+    return commands[:_SLASH_COMPLETION_LIMIT] + skills[:_SLASH_COMPLETION_LIMIT]
+
+
+_FUZZY_CACHE_TTL_S = 5.0
+_FUZZY_CACHE_MAX_FILES = 20000
+_FUZZY_FALLBACK_EXCLUDES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".next",
+        ".cache",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        "dist",
+        "build",
+        "target",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+    }
+)
+_fuzzy_cache_lock = threading.Lock()
+_fuzzy_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def _list_repo_files(root: str) -> list[str]:
+    now = time.monotonic()
+    with _fuzzy_cache_lock:
+        cached = _fuzzy_cache.get(root)
+        if cached and now - cached[0] < _FUZZY_CACHE_TTL_S:
+            return cached[1]
+
+    files: list[str] = []
+    from hermes_cli._subprocess_compat import windows_hide_flags
+
+    try:
+        top_result = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            timeout=2.0,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            creationflags=windows_hide_flags(),
+        )
+        if top_result.returncode == 0:
+            top = top_result.stdout.decode("utf-8", "replace").strip()
+            list_result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    top,
+                    "ls-files",
+                    "-z",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                ],
+                capture_output=True,
+                timeout=2.0,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                creationflags=windows_hide_flags(),
+            )
+            if list_result.returncode == 0:
+                for p in list_result.stdout.decode("utf-8", "replace").split("\0"):
+                    if not p:
+                        continue
+                    rel = os.path.relpath(os.path.join(top, p), root).replace(
+                        os.sep, "/"
+                    )
+                    if rel.startswith("../"):
+                        continue
+                    files.append(rel)
+                    if len(files) >= _FUZZY_CACHE_MAX_FILES:
+                        break
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    if not files:
+        try:
+            for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+                dirnames[:] = [
+                    d
+                    for d in dirnames
+                    if d not in _FUZZY_FALLBACK_EXCLUDES and not d.startswith(".")
+                ]
+                rel_dir = os.path.relpath(dirpath, root)
+                for f in filenames:
+                    rel = f if rel_dir == "." else f"{rel_dir}/{f}"
+                    files.append(rel.replace(os.sep, "/"))
+                    if len(files) >= _FUZZY_CACHE_MAX_FILES:
+                        break
+                if len(files) >= _FUZZY_CACHE_MAX_FILES:
+                    break
+        except OSError:
+            pass
+
+    with _fuzzy_cache_lock:
+        _fuzzy_cache[root] = (now, files)
+    return files
+
+
+def _fuzzy_basename_rank(name: str, query: str) -> tuple[int, int] | None:
+    if not query:
+        return (3, len(name))
+    nl = name.lower()
+    ql = query.lower()
+    if nl == ql:
+        return (0, len(name))
+    if nl.startswith(ql):
+        return (1, len(name))
+
+    parts: list[str] = []
+    buf = ""
+    for ch in name:
+        if ch in "-_." or (ch.isupper() and buf and not buf[-1].isupper()):
+            if buf:
+                parts.append(buf)
+            buf = ch if ch not in "-_." else ""
+        else:
+            buf += ch
+    if buf:
+        parts.append(buf)
+    for p in parts:
+        if p.lower().startswith(ql):
+            return (2, len(name))
+    if ql in nl:
+        return (3, len(name))
+
+    i = 0
+    for ch in nl:
+        if ch == ql[i]:
+            i += 1
+            if i == len(ql):
+                return (4, len(name))
+    return None
+
+
+def _abs_completion_prefix_exists(path_part: str) -> bool:
+    expanded = _normalize_completion_path(path_part)
+    parent = os.path.dirname(expanded.rstrip("/")) or "/"
+    tail = os.path.basename(expanded.rstrip("/"))
+    if not os.path.isdir(parent):
+        return False
+    if not tail or expanded.endswith("/"):
+        return os.path.isdir(expanded) or expanded == "/"
+    try:
+        tail_lower = tail.lower()
+        return any(e.lower().startswith(tail_lower) for e in os.listdir(parent))
+    except OSError:
+        return False
+
+
+def _details_completion_item(value: str, meta: str = "") -> dict:
+    return {"text": value, "display": value, "meta": meta}
+
+
+def _details_root_completion_item(
+    value: str, meta: str, needs_leading_space: bool
+) -> dict:
+    return _details_completion_item(
+        f" {value}" if needs_leading_space else value,
+        meta,
+    )
+
+
+def _details_completions(text: str) -> list[dict] | None:
+    if not text.lower().startswith("/details"):
+        return None
+
+    stripped = text.strip()
+    if stripped and not "/details".startswith(stripped.lower().split()[0]):
+        return None
+
+    body = text[len("/details") :]
+    if body.startswith(" "):
+        body = body[1:]
+    parts = body.split()
+    has_trailing_space = text.endswith(" ")
+    sections = ("thinking", "tools", "subagents", "activity")
+    modes = ("hidden", "collapsed", "expanded")
+
+    if not body or (len(parts) == 0 and has_trailing_space):
+        return [
+            *[
+                _details_root_completion_item(
+                    mode, "global mode", not has_trailing_space
+                )
+                for mode in modes
+            ],
+            _details_root_completion_item(
+                "cycle", "cycle global mode", not has_trailing_space
+            ),
+            *[
+                _details_root_completion_item(
+                    section, "section override", not has_trailing_space
+                )
+                for section in sections
+            ],
+        ]
+
+    if len(parts) == 1 and not has_trailing_space:
+        prefix = parts[0].lower()
+        candidates = [*modes, "cycle", *sections]
+        return [
+            _details_completion_item(
+                candidate,
+                (
+                    "section override"
+                    if candidate in sections
+                    else "cycle global mode" if candidate == "cycle" else "global mode"
+                ),
+            )
+            for candidate in candidates
+            if candidate.startswith(prefix) and candidate != prefix
+        ]
+
+    if len(parts) == 1 and has_trailing_space and parts[0].lower() in sections:
+        return [
+            *[
+                _details_completion_item(mode, f"set {parts[0].lower()}")
+                for mode in modes
+            ],
+            _details_completion_item("reset", f"clear {parts[0].lower()} override"),
+        ]
+
+    if len(parts) == 2 and not has_trailing_space and parts[0].lower() in sections:
+        prefix = parts[1].lower()
+        return [
+            _details_completion_item(
+                candidate,
+                (
+                    f"clear {parts[0].lower()} override"
+                    if candidate == "reset"
+                    else f"set {parts[0].lower()}"
+                ),
+            )
+            for candidate in (*modes, "reset")
+            if candidate.startswith(prefix) and candidate != prefix
+        ]
+
+    return []
+
+
+def _model_picker_context(agent, services: CompletionServices | None = None):
+    if services is None:
+        services = _standalone_services()
+    from hermes_cli.inventory import load_picker_context
+
+    ctx = load_picker_context()
+    provider = getattr(agent, "provider", "") if agent else ""
+    base_url = getattr(agent, "base_url", "") if agent else ""
+    if str(provider or "").strip().lower() == "custom":
+        try:
+            from hermes_cli.runtime_provider import canonical_custom_identity
+
+            provider = (
+                canonical_custom_identity(
+                    base_url=base_url or None,
+                    config_provider=ctx.current_provider,
+                    model=(getattr(agent, "model", "") if agent else "") or None,
+                )
+                or provider
+            )
+        except Exception:
+            logger.debug(
+                "custom provider identity recovery failed (model picker)",
+                exc_info=True,
+            )
+
+    return ctx.with_overrides(
+        current_provider=provider,
+        current_model=(getattr(agent, "model", "") if agent else "")
+        or services.resolve_model(),
+        current_base_url=base_url,
+    )
+
+
+def _standalone_services() -> CompletionServices:
+    from hermes_constants import get_hermes_home
+
+    def load_cfg() -> dict:
+        from hermes_cli.config import load_config_readonly
+
+        cfg = load_config_readonly()
+        return cfg if isinstance(cfg, dict) else {}
+
+    def profile_home(_profile: str | None) -> Path | None:
+        return None
+
+    def resolve_model() -> str:
+        cfg = load_cfg()
+        model = cfg.get("model", "")
+        if isinstance(model, dict):
+            return str(model.get("default", "") or "").strip()
+        return str(model or "").strip()
+
+    return CompletionServices(
+        sessions={},
+        hermes_home=get_hermes_home,
+        profile_home=profile_home,
+        load_cfg=load_cfg,
+        apply_managed=lambda cfg: cfg,
+        resolve_model=resolve_model,
+    )
+
+
+def register(
+    methods: dict[str, Callable],
+    *,
+    services: CompletionServices,
+) -> None:
+    """Register ordinary completion callables under the existing JSON-RPC names."""
+
+    def bind(handler: Callable[[object, dict, CompletionServices], dict]):
+        return lambda rid, params: handler(rid, params, services)
+
+    methods["paste.collapse"] = bind(paste_collapse)
+    methods["complete.path"] = bind(complete_path)
+    methods["complete.slash"] = bind(complete_slash)
+    methods["model.options"] = bind(model_options)
+    methods["model.save_key"] = bind(model_save_key)
+    methods["model.disconnect"] = bind(model_disconnect)

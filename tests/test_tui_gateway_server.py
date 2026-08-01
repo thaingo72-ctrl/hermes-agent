@@ -15,9 +15,20 @@ import pytest
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 from hermes_cli.active_sessions import active_session_registry_snapshot
 from hermes_cli.browser_connect import ChromeDebugLaunch
-from tui_gateway import methods_billing
+from tui_gateway import methods_billing, methods_complete
 from tui_gateway import server
 from tui_gateway.transport import write_json_frame
+
+
+def _completion_services() -> methods_complete.CompletionServices:
+    return methods_complete.CompletionServices(
+        sessions=server._sessions,
+        hermes_home=lambda: server._hermes_home,
+        profile_home=server._profile_home,
+        load_cfg=server._load_cfg,
+        apply_managed=server._apply_managed,
+        resolve_model=server._resolve_model,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +68,11 @@ def test_session_slot_is_claimed_on_first_turn_not_on_create(monkeypatch, tmp_pa
         server._cfg_path = None
         _clear_server_sessions()
         monkeypatch.setattr(server, "_start_agent_build", lambda *args, **kwargs: None)
-        monkeypatch.setattr(server, "_completion_cwd", lambda params=None: str(tmp_path))
+        monkeypatch.setattr(
+            methods_complete,
+            "_completion_cwd",
+            lambda params=None, services=None: str(tmp_path),
+        )
 
         # Opening a chat must NOT take a slot. Every tile paint and every
         # background reconnect-resume calls session.create, and an unprompted
@@ -759,9 +774,12 @@ def test_completion_cwd_prefers_profile_over_stale_env(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_load_cfg", lambda: {})
     monkeypatch.setattr(server, "_profile_home", lambda name: home if name else None)
 
-    assert server._completion_cwd({"profile": "ef-design"}) == str(profile_b)
+    assert (
+        methods_complete._completion_cwd({"profile": "ef-design"}, _completion_services())
+        == str(profile_b)
+    )
     # No profile and no launch config → fallback to the launch env var.
-    assert server._completion_cwd({}) == str(stale)
+    assert methods_complete._completion_cwd({}, _completion_services()) == str(stale)
 
 
 def test_completion_cwd_prefers_launch_config_over_stale_env(monkeypatch, tmp_path):
@@ -782,7 +800,7 @@ def test_completion_cwd_prefers_launch_config_over_stale_env(monkeypatch, tmp_pa
     monkeypatch.setattr(server, "_load_cfg", lambda: {"terminal": {"cwd": str(configured)}})
     monkeypatch.setattr(server, "_profile_home", lambda _name: None)
 
-    assert server._completion_cwd({}) == str(configured)
+    assert methods_complete._completion_cwd({}, _completion_services()) == str(configured)
 
 
 def test_default_session_cwd_prefers_launch_config(monkeypatch, tmp_path):
@@ -813,7 +831,10 @@ def test_completion_cwd_explicit_cwd_wins_over_profile(monkeypatch, tmp_path):
     home = _write_profile_cfg(tmp_path / "home-c", str(profile_b))
 
     monkeypatch.setattr(server, "_profile_home", lambda name: home if name else None)
-    result = server._completion_cwd({"cwd": str(explicit), "profile": "ef-design"})
+    result = methods_complete._completion_cwd(
+        {"cwd": str(explicit), "profile": "ef-design"},
+        _completion_services(),
+    )
     assert result == str(explicit)
 
 
@@ -6136,12 +6157,14 @@ _SLASH_FILLER_COUNT = 60
 
 
 def _slash_skill_fixtures(monkeypatch):
+    from tui_gateway import methods_complete
+
     """Stub a skill install big enough that a flat cap would truncate it."""
     filler = {f"/filler-{i:03d}": 0 for i in range(_SLASH_FILLER_COUNT)}
     usage = {"work": 297, "research": 84, "clean": 12}
 
     monkeypatch.setattr(
-        server,
+        methods_complete,
         "_skill_usage_lookup",
         lambda: (
             lambda name: usage.get(name, 0),
@@ -7912,13 +7935,15 @@ def test_commands_catalog_surfaces_quick_commands(monkeypatch):
 
 
 def test_commands_catalog_ranks_skill_commands_by_recorded_usage(monkeypatch):
+    from tui_gateway import methods_complete
+
     """Skill entries carry the usage + origin the `/` menu ranks on.
 
     Without it the menu is alphabetical, so a bundled skill the user has never
     opened outranks the one they invoke daily.
     """
     monkeypatch.setattr(
-        server,
+        methods_complete,
         "_skill_usage_lookup",
         lambda: (
             lambda name: {"research": 60, "work": 172}.get(name, 0),
@@ -10706,7 +10731,11 @@ def test_session_create_reports_requested_profile_name(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_start_agent_build", lambda *a, **k: None)
     monkeypatch.setattr(server, "_schedule_agent_build", lambda *a, **k: None)
     monkeypatch.setattr(server, "_schedule_session_cap_enforcement", lambda *a, **k: None)
-    monkeypatch.setattr(server, "_completion_cwd", lambda params=None: str(tmp_path))
+    monkeypatch.setattr(
+        methods_complete,
+        "_completion_cwd",
+        lambda params=None, services=None: str(tmp_path),
+    )
     monkeypatch.setattr(server, "_profile_home", lambda p: profile_home if p == "mlperf" else None)
     monkeypatch.setattr(server, "_current_profile_name", lambda: "default")
     monkeypatch.setattr(server, "_claim_active_session_slot", lambda *a, **k: (None, None))
@@ -11324,6 +11353,8 @@ def test_model_options_preserves_canonical_custom_row_after_agent_init(monkeypat
 
 
 def test_model_save_key_uses_credential_lifecycle_and_picker_context(monkeypatch):
+    from tui_gateway import methods_complete
+
     env_var = "TEST_PROVIDER_API_KEY"
     agent = object()
     picker_ctx = object()
@@ -11351,7 +11382,7 @@ def test_model_save_key_uses_credential_lifecycle_and_picker_context(monkeypatch
         save_credential,
     )
     picker_context = Mock(return_value=picker_ctx)
-    monkeypatch.setattr(server, "_model_picker_context", picker_context)
+    monkeypatch.setattr(methods_complete, "_model_picker_context", picker_context)
     build_payload = Mock(return_value={"providers": [provider]})
     monkeypatch.setattr(
         "hermes_cli.inventory.build_models_payload",
@@ -11372,7 +11403,8 @@ def test_model_save_key_uses_credential_lifecycle_and_picker_context(monkeypatch
     assert "result" in resp, resp
     assert resp["result"]["provider"] == {**provider, "authenticated": True}
     save_credential.assert_called_once_with(env_var, fake_key)
-    picker_context.assert_called_once_with(agent)
+    assert picker_context.call_count == 1
+    assert picker_context.call_args.args[0] is agent
     build_payload.assert_called_once_with(
         picker_ctx,
         picker_hints=True,
