@@ -8,6 +8,11 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 - Prefer established, well-maintained libraries over custom implementations.
 - Make architectural decisions for the long term. Do not accept a stopgap that
   only works for now and is meant to be replaced later.
+- When a requested repository change is intended to persist, finish it with a
+  scoped commit unless the user explicitly asks for working-tree-only changes.
+- Stage only task-owned files; never sweep unrelated edits into a commit. Verify
+  the commit contains the intended diff and task-owned paths are clean before
+  reporting completion.
 
 ## What Hermes Is
 
