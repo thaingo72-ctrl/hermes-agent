@@ -154,15 +154,15 @@ def test_gateway_config_loop_watchdog_round_trip():
     """loop_watchdog is a config.yaml knob: default on, nested-gateway form honored."""
     from gateway.config import GatewayConfig
 
-    assert GatewayConfig.from_dict({}).loop_watchdog is True
-    assert GatewayConfig.from_dict({"loop_watchdog": False}).loop_watchdog is False
+    assert GatewayConfig.model_validate({}).loop_watchdog is True
+    assert GatewayConfig.model_validate({"loop_watchdog": False}).loop_watchdog is False
     assert (
-        GatewayConfig.from_dict(
+        GatewayConfig.model_validate(
             {"gateway": {"loop_watchdog": "off"}}
         ).loop_watchdog
         is False
     )
-    config = GatewayConfig.from_dict({"loop_watchdog": False})
+    config = GatewayConfig.model_validate({"loop_watchdog": False})
     assert config.to_dict()["loop_watchdog"] is False
 
 

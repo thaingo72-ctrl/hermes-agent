@@ -39,25 +39,50 @@ Configuration (config.yaml):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import logging
+from pydantic import BaseModel, ConfigDict, field_validator
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class ProfileRoute:
+class ProfileRoute(BaseModel):
     """A single routing rule that maps a platform scope to a profile."""
 
-    name: str
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = ""
     platform: str
     profile: str
     guild_id: Optional[str] = None
     chat_id: Optional[str] = None
     thread_id: Optional[str] = None
     enabled: bool = True
+
+    @field_validator("profile")
+    @classmethod
+    def _validate_profile(cls, value: str) -> str:
+        from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+
+        normalized = normalize_profile_name(value)
+        validate_profile_name(normalized)
+        return normalized
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            token = value.strip().lower()
+            if token in {"true", "1", "yes", "on"}:
+                return True
+            if token in {"false", "0", "no", "off"}:
+                return False
+        raise ValueError("enabled must be a boolean")
 
     @property
     def specificity(self) -> int:
@@ -113,38 +138,16 @@ def parse_profile_routes(raw: Optional[List[Dict[str, Any]]]) -> List[ProfileRou
     for entry in raw:
         if not isinstance(entry, dict):
             continue
-        name = entry.get("name", "")
-        platform = entry.get("platform", "")
-        profile = entry.get("profile", "")
-        if not platform or not profile:
-            logger.warning(
-                "Skipping profile route %s: missing platform or profile",
-                name,
-            )
-            continue
-        # Validate profile name to prevent path traversal. Lazy import avoids a
-        # circular dependency at module load time.
         try:
-            from hermes_cli.profiles import (
-                normalize_profile_name,
-                validate_profile_name,
+            route = ProfileRoute.model_validate(entry)
+        except (ValueError, ImportError) as exc:
+            logger.warning(
+                "Skipping invalid profile route %r: %s",
+                entry.get("name", ""),
+                exc,
             )
-            profile = normalize_profile_name(profile)
-            validate_profile_name(profile)
-        except (ValueError, ImportError):
-            logger.warning("Skipping profile route %s: invalid profile name %r", name, profile)
             continue
-        routes.append(
-            ProfileRoute(
-                name=name,
-                platform=platform,
-                profile=profile,
-                guild_id=entry.get("guild_id"),
-                chat_id=entry.get("chat_id"),
-                thread_id=entry.get("thread_id"),
-                enabled=entry.get("enabled", True),
-            )
-        )
+        routes.append(route)
     # Sort: most specific first so the first match wins.
     routes.sort(key=lambda r: r.specificity, reverse=True)
     logger.debug("Loaded %d profile routes (most-specific-first)", len(routes))

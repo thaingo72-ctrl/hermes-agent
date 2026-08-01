@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 import sys
+from typing import get_args
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -48,6 +49,17 @@ def test_gateway_profile_routes_json_roundtrip_with_semantic_equality(tmp_path, 
 
     assert reloaded.profile_routes == loaded.profile_routes
     assert reloaded.model_dump(mode="json")["profile_routes"] == [route]
+
+
+def test_gateway_runtime_config_is_the_canonical_pydantic_model():
+    from gateway.config import GatewayConfig
+    from gateway.profile_routing import ProfileRoute
+    from hermes_cli.config import HermesConfigModel
+
+    assert HermesConfigModel.model_fields["gateway"].annotation is GatewayConfig
+    assert get_args(GatewayConfig.model_fields["profile_routes"].annotation) == (ProfileRoute,)
+    assert hasattr(GatewayConfig, "model_fields")
+    assert "from_dict" not in GatewayConfig.__dict__
 
 
 def test_load_typed_config_can_explicitly_suppress_user_config(tmp_path, monkeypatch):
@@ -165,3 +177,67 @@ def test_invalid_env_expanded_scalar_reports_precise_diagnostic_and_gateway_keep
     gateway = load_gateway_config()
     assert gateway.loop_watchdog is False
     assert gateway.max_concurrent_sessions == 6
+
+
+def test_invalid_gateway_profile_route_fails_without_discarding_sibling_diagnostics(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    _write_config(
+        home,
+        {
+            "gateway": {
+                "loop_watchdog": False,
+                "max_concurrent_sessions": "6",
+                "quick_commands": {
+                    "limits": {"type": "exec", "command": "echo ok"},
+                },
+                "profile_routes": [
+                    {
+                        "name": "broken",
+                        "platform": "discord",
+                        "guild_id": "guild-1",
+                    }
+                ],
+            }
+        },
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    _reset_config_modules()
+
+    from gateway.config import load_gateway_config
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_gateway_config()
+
+    errors = excinfo.value.errors()
+    assert errors[0]["loc"] == ("profile_routes", 0, "profile")
+    assert "field required" in errors[0]["msg"].lower()
+
+
+def test_profile_route_rejects_path_traversal_with_precise_field_path():
+    from gateway.config import GatewayConfig
+
+    with pytest.raises(ValidationError) as excinfo:
+        GatewayConfig.model_validate(
+            {
+                "profile_routes": [
+                    {
+                        "name": "escape",
+                        "platform": "discord",
+                        "profile": "../escape",
+                    }
+                ]
+            }
+        )
+
+    assert excinfo.value.errors()[0]["loc"] == ("profile_routes", 0, "profile")
+
+
+def test_explicit_null_false_default_gateway_booleans_stay_false():
+    from gateway.config import GatewayConfig
+
+    config = GatewayConfig.model_validate(
+        {"thread_sessions_per_user": None, "multiplex_profiles": None}
+    )
+
+    assert config.thread_sessions_per_user is False
+    assert config.multiplex_profiles is False

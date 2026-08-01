@@ -12,7 +12,7 @@ from gateway.session import SessionSource
 
 
 def test_gateway_config_stt_disabled_from_dict_nested():
-    config = GatewayConfig.from_dict({"stt": {"enabled": False}})
+    config = GatewayConfig.model_validate({"stt": {"enabled": False}})
     assert config.stt_enabled is False
 
 

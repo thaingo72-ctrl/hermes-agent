@@ -225,18 +225,18 @@ class TestGatewayConfigRoundtrip:
         ]
 
         for raw in invalid_values:
-            config = GatewayConfig.from_dict({"systemd_watchdog_seconds": raw})
+            config = GatewayConfig.model_validate({"systemd_watchdog_seconds": raw})
             assert config.systemd_watchdog_seconds == 0
 
 
     def test_max_concurrent_sessions_from_dict_ignores_invalid_values(self, caplog):
         caplog.set_level(logging.WARNING, logger="gateway.config")
 
-        config = GatewayConfig.from_dict({"max_concurrent_sessions": "many"})
+        config = GatewayConfig.model_validate({"max_concurrent_sessions": "many"})
 
         assert config.max_concurrent_sessions is None
         assert any(
-            "Ignoring invalid max_concurrent_sessions='many'" in record.message
+            "Ignoring invalid gateway.max_concurrent_sessions='many'" in record.message
             for record in caplog.records
         )
 
@@ -252,7 +252,7 @@ class TestGatewayConfigRoundtrip:
             },
         )
 
-        restored = GatewayConfig.from_dict(config.to_dict())
+        restored = GatewayConfig.model_validate(config.to_dict())
 
         assert restored.unauthorized_dm_behavior == "ignore"
         assert restored.platforms[Platform.WHATSAPP].extra["unauthorized_dm_behavior"] == "pair"

@@ -48,7 +48,7 @@ class _FakeRequest:
 
 class TestMSGraphWebhookConfig:
     def test_gateway_config_accepts_msgraph_webhook_platform(self):
-        config = GatewayConfig.from_dict(
+        config = GatewayConfig.model_validate(
             {
                 "platforms": {
                     "msgraph_webhook": {

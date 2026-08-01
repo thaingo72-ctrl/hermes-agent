@@ -248,7 +248,7 @@ class TestGatewayConfigPluginPlatform:
                     "testplat": {"enabled": True, "extra": {"token": "abc"}},
                 }
             }
-            cfg = GatewayConfig.from_dict(data)
+            cfg = GatewayConfig.model_validate(data)
             connected = cfg.get_connected_platforms()
             connected_values = {p.value for p in connected}
             assert "testplat" in connected_values
