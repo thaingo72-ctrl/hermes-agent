@@ -13185,6 +13185,7 @@ from . import (  # noqa: E402
     methods_billing as _methods_billing,
     methods_complete as _methods_complete,
     methods_config as _methods_config,
+    methods_delegation as _methods_delegation,
     methods_prompt as _methods_prompt,
     methods_session as _methods_session,
     methods_tools as _methods_tools,
@@ -13193,6 +13194,20 @@ from . import (  # noqa: E402
 _methods_billing.register(
     _methods,
     services=_methods_billing.default_billing_services(emit=_emit),
+)
+_methods_delegation.register(
+    _methods,
+    services=_methods_delegation.default_delegation_tool_services(
+        sess_nowait=_sess_nowait,
+        current_transport=current_transport,
+        stdio_transport=_stdio_transport,
+        enqueue_prompt=_enqueue_prompt,
+        record_inflight_correction=_record_inflight_correction,
+        spawn_trees_root=_spawn_trees_root,
+        spawn_tree_session_dir=_spawn_tree_session_dir,
+        append_spawn_tree_index=_append_spawn_tree_index,
+        read_spawn_tree_index=_read_spawn_tree_index,
+    ),
 )
 
 for _m in (
