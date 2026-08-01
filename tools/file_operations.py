@@ -809,11 +809,11 @@ class ShellFileOperations(FileOperations):
                  no cwd attribute (rare — most backends track cwd live).
 
         Note:
-            Every _exec() call prefers the LIVE ``terminal_env.cwd`` over
-            ``self.cwd`` so ``cd`` commands run via the terminal tool are
-            picked up immediately.  ``self.cwd`` is only used as a fallback
-            when the env has no cwd at all — it is NOT the authoritative
-            cwd, despite being settable at init time.
+            Model-facing file tools pass session-resolved absolute paths into
+            this class. For direct shell-operation callers that still use
+            relative paths, _exec() can fall back to the backend's current cwd
+            as an environment-local convenience; it is not the authoritative
+            per-session cwd.
 
             Historical bug (fixed): prior versions of this class used the
             init-time cwd for every _exec() call, which caused relative
@@ -841,14 +841,10 @@ class ShellFileOperations(FileOperations):
             stdin_data: If provided, piped to the process's stdin instead of
                         embedding in the command string. Bypasses ARG_MAX.
 
-        Cwd resolution order (critical — see class docstring):
+        Cwd resolution order for direct shell-operation callers:
           1. Explicit ``cwd`` arg (if provided)
-          2. Live ``self.env.cwd`` (tracks ``cd`` commands run via terminal)
+          2. Current backend ``self.env.cwd``
           3. Init-time ``self.cwd`` (fallback when env has no cwd attribute)
-
-        This ordering ensures relative paths in file operations follow the
-        terminal's current directory — not the directory this file_ops was
-        originally created in.  See test_file_ops_cwd_tracking.py.
         """
         kwargs = {}
         if timeout:
@@ -856,8 +852,6 @@ class ShellFileOperations(FileOperations):
         if stdin_data is not None:
             kwargs['stdin_data'] = stdin_data
 
-        # Resolve cwd from the live env so `cd` commands are picked up.
-        # Fall through to init-time self.cwd only if the env doesn't track cwd.
         effective_cwd = cwd or getattr(self.env, 'cwd', None) or self.cwd
         result = self.env.execute(command, cwd=effective_cwd, **kwargs)
         return ExecuteResult(

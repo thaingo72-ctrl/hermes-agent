@@ -78,7 +78,6 @@ def test_search_tool_blocks_direct_auth_json_path(fake_home, monkeypatch):
     import json
 
     import tools.file_tools as ft
-    import tools.terminal_tool as terminal_tool
 
     auth = _create(fake_home, "auth.json")
     auth.write_text("SEARCH_DIRECT_AUTH_SECRET", encoding="utf-8")
@@ -105,9 +104,9 @@ def test_search_tool_filters_credential_results(fake_home, tmp_path, monkeypatch
     """Directory searches omit credential and MCP-token result entries."""
     import json
 
+    import agent.runtime_cwd as runtime_cwd
     from tools.file_operations import SearchMatch, SearchResult
     import tools.file_tools as ft
-    import tools.terminal_tool as terminal_tool
 
     auth = _create(fake_home, "auth.json")
     token = _create(fake_home, Path("mcp-tokens") / "provider.json")
@@ -140,9 +139,7 @@ def test_search_tool_filters_credential_results(fake_home, tmp_path, monkeypatch
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(ft, "_get_file_ops", lambda task_id="default": FakeFileOps())
-    monkeypatch.setattr(
-        terminal_tool, "_session_cwd", {}
-    )
+    monkeypatch.setattr(runtime_cwd, "_SESSION_CWD_RECORDS", {})
 
     search_response = ft.search_tool(
         pattern="SEARCH",

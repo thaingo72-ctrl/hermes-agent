@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
+import agent.runtime_cwd as runtime_cwd
 
 os.environ["TERMINAL_ENV"] = "local"
 
@@ -131,9 +132,9 @@ class TestResolveChildCwd(unittest.TestCase):
             task_id = "stale-record-test"
             with patch.dict(os.environ, {"TERMINAL_CWD": "/does/not/exist"}):
                 with patch.object(terminal_tool, "_task_env_overrides", {}, create=False), \
-                     patch.object(terminal_tool, "_session_cwd", {}, create=False):
+                     patch.object(runtime_cwd, "_SESSION_CWD_RECORDS", {}, create=False):
                     terminal_tool.register_task_env_overrides(task_id, {"cwd": reg})
-                    terminal_tool.record_session_cwd(task_id, "/deleted/dir/gone")
+                    runtime_cwd.record_session_cwd(task_id, "/deleted/dir/gone")
                     self.assertEqual(
                         _resolve_child_cwd("project", "/tmp/staging", task_id=task_id), reg
                     )

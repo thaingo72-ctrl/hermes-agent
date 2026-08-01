@@ -2019,8 +2019,10 @@ def execute_tool_calls_segmented(agent, assistant_message, messages: list, effec
     from types import SimpleNamespace
 
     if segments is None:
-        _active_env = get_active_env(effective_task_id)
-        _exec_cwd = Path(_active_env.cwd) if _active_env is not None and _active_env.cwd else None
+        from agent.runtime_cwd import get_recorded_session_cwd
+
+        _recorded_cwd = get_recorded_session_cwd(effective_task_id)
+        _exec_cwd = Path(_recorded_cwd) if _recorded_cwd else None
         segments = _plan_tool_batch_segments(assistant_message.tool_calls, execution_cwd=_exec_cwd)
 
     for kind, calls in segments:

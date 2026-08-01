@@ -1135,58 +1135,6 @@ def _maybe_reap_docker_orphans(container_config: Dict[str, Any]) -> None:
 # Thread-safe because each task_id is unique per rollout.
 _task_env_overrides: Dict[str, Dict[str, Any]] = {}
 
-# ── Per-session cwd records (cwd rearchitecture, step 1) ────────────────────
-#
-# The durable source of truth for "which directory is THIS session working
-# in". Keyed by the raw session/task key (NOT the collapsed container id):
-# the terminal env is shared across sessions, so any cwd state stored on the
-# env is a global mutable timeshared between sessions — the root cause of the
-# wrong-worktree bug class (env.cwd_owner stamping, _last_known_cwd, and the
-# ownership ladder in file_tools are all patches over that misplacement).
-#
-# Step 1 (this change): dual-write only. Every site that learns a session's
-# live cwd (post-command tracking, cwd-override registration) also records it
-# here. Readers still use the legacy env.cwd ladder. Later steps flip
-# file_tools and _resolve_command_cwd to read this store, then delete the
-# env-side tracking + ownership guards.
-_session_cwd: Dict[str, str] = {}
-_session_cwd_lock = threading.Lock()
-
-
-def record_session_cwd(session_key: Optional[str], cwd: Optional[str]) -> None:
-    """Record *cwd* as the working directory of *session_key*.
-
-    Called wherever a session's live cwd becomes known: after a terminal
-    command completes (the env's post-command tracking has just parsed the
-    resulting cwd) and when a surface registers a workspace cwd override.
-    Empty/None session keys collapse to ``"default"`` (single-session CLI).
-    Non-string / empty cwds are ignored.
-    """
-    if not isinstance(cwd, str) or not cwd.strip():
-        return
-    key = str(session_key or "default")
-    with _session_cwd_lock:
-        if _session_cwd.get(key) != cwd:
-            _session_cwd[key] = cwd
-
-
-def get_session_cwd(session_key: Optional[str]) -> Optional[str]:
-    """Return the recorded working directory for *session_key*, if any.
-
-    No fallback chain here on purpose: callers decide what an absent record
-    means (config default, TERMINAL_CWD seed, process cwd). ``None``/empty
-    keys read the ``"default"`` record.
-    """
-    key = str(session_key or "default")
-    with _session_cwd_lock:
-        return _session_cwd.get(key)
-
-
-def clear_session_cwd(session_key: str) -> None:
-    """Drop a session's cwd record (session teardown)."""
-    with _session_cwd_lock:
-        _session_cwd.pop(session_key, None)
-
 
 def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
     """
@@ -1210,9 +1158,12 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
     # ``cwd`` override (e.g. the ACP client switching the editor's project root
     # mid-session via ``session/load`` / ``session/resume``) must take effect
     # immediately. The session record is what commands resolve against;
-    # the live env's cwd is also updated so env-side seeding stays consistent.
+    # the live env's cwd is updated as a backend hint for future env-local
+    # command helpers, but it is not the authoritative session cwd.
     new_cwd = overrides.get("cwd")
     if isinstance(new_cwd, str) and new_cwd.strip():
+        from agent.runtime_cwd import record_session_cwd
+
         # A registered workspace cwd IS the session's working directory until
         # a `cd` changes it.
         record_session_cwd(task_id, new_cwd)
@@ -1234,8 +1185,10 @@ def clear_task_env_overrides(task_id: str):
 
     Called during cleanup to avoid stale entries accumulating.
     """
+    from agent.runtime_cwd import clear_recorded_session_cwd
+
     _task_env_overrides.pop(task_id, None)
-    clear_session_cwd(task_id)
+    clear_recorded_session_cwd(task_id)
 
 
 def _resolve_container_task_id(task_id: Optional[str]) -> str:
@@ -1890,6 +1843,10 @@ def cleanup_vm(task_id: str, *, force_remove: bool = False):
     via this function), so persist-mode idle envs are similarly no-op'd —
     only the orphan reaper at next startup reclaims them.
     """
+    from agent.runtime_cwd import clear_recorded_session_cwd
+
+    clear_recorded_session_cwd(task_id)
+
     # Remove from tracking dicts while holding the lock, but defer the
     # actual (potentially slow) env.cleanup() call to outside the lock
     # so other tool calls aren't blocked.
@@ -2169,7 +2126,7 @@ def _resolve_command_cwd(
 ) -> str:
     """Return the cwd for a command. Explicit ``workdir=`` overrides everything.
 
-    Otherwise the session's own cwd RECORD (``get_session_cwd``) wins — it is
+    Otherwise the session's own cwd record wins: it is
     written after every completed command for this session, so it IS the
     session's ``cd`` state, with no shared-env ambiguity: another session's
     ``cd`` lands in another record and can't affect us. A session with no
@@ -2178,7 +2135,9 @@ def _resolve_command_cwd(
     """
     if workdir:
         return workdir
-    return get_session_cwd(session_key) or default_cwd
+    from agent.runtime_cwd import get_recorded_session_cwd
+
+    return get_recorded_session_cwd(session_key) or default_cwd
 
 
 def terminal_tool(
@@ -2267,7 +2226,9 @@ def terminal_tool(
         else:
             image = ""
 
-        cwd = overrides.get("cwd") or get_session_cwd(task_id) or config["cwd"]
+        from agent.runtime_cwd import get_recorded_session_cwd
+
+        cwd = overrides.get("cwd") or get_recorded_session_cwd(task_id) or config["cwd"]
         # A per-task cwd override (registered by the gateway/TUI for workspace
         # tracking, or by RL/benchmark envs) wins over config["cwd"] — but
         # config["cwd"] was already sanitized for container backends in
@@ -2847,12 +2808,11 @@ def terminal_tool(
                 # Got a result
                 break
 
-            # Dual-write (cwd rearch step 1): the env's post-command tracking
-            # (marker parse / local sync) has just updated env.cwd with the
-            # directory this command finished in. That cwd belongs to THIS
-            # session — record it under the session key so the durable record
-            # never depends on the shared env surviving or on who drives the
-            # env next.
+            from agent.runtime_cwd import record_session_cwd
+
+            # The env's post-command tracking (marker parse / local sync) has
+            # just updated env.cwd with the directory this command finished in.
+            # That cwd belongs to this session, so record it under the session key.
             record_session_cwd(session_key, getattr(env, "cwd", None))
 
             # Extract output

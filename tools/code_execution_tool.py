@@ -1844,9 +1844,9 @@ def _resolve_child_cwd(mode: str, staging_dir: str, task_id: str = "") -> str:
     if task_id:
         # 1. The session's cwd record — IS the session's `cd` state.
         try:
-            from tools.terminal_tool import get_session_cwd
+            from agent.runtime_cwd import get_recorded_session_cwd
 
-            recorded = get_session_cwd(task_id)
+            recorded = get_recorded_session_cwd(task_id)
         except Exception:
             recorded = None
         if recorded and os.path.isdir(recorded):

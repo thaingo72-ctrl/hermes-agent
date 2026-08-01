@@ -13,7 +13,7 @@ import subprocess
 
 import pytest
 
-import tools.terminal_tool as terminal_tool
+import agent.runtime_cwd as runtime_cwd
 import tui_gateway.server as server
 
 
@@ -47,9 +47,9 @@ def repo_with_worktree(tmp_path):
 def session(repo_with_worktree):
     repo, _ = repo_with_worktree
     key = "sess-follow"
-    terminal_tool.clear_session_cwd(key)
+    runtime_cwd.clear_recorded_session_cwd(key)
     yield {"session_key": key, "cwd": str(repo), "source": "desktop"}
-    terminal_tool.clear_session_cwd(key)
+    runtime_cwd.clear_recorded_session_cwd(key)
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +63,7 @@ def _no_db(monkeypatch):
 def test_settling_in_a_worktree_reanchors_the_session(session, repo_with_worktree):
     """The whole reported bug: work goes to the worktree, the session says main."""
     _, worktree = repo_with_worktree
-    terminal_tool.record_session_cwd(session["session_key"], str(worktree))
+    runtime_cwd.record_session_cwd(session["session_key"], str(worktree))
 
     assert server._reconcile_session_cwd_from_terminal(session) is True
     assert session["cwd"] == str(worktree)
@@ -75,7 +75,7 @@ def test_a_subdirectory_of_the_same_checkout_is_not_a_move(session, repo_with_wo
     repo, _ = repo_with_worktree
     sub = repo / "src"
     sub.mkdir()
-    terminal_tool.record_session_cwd(session["session_key"], str(sub))
+    runtime_cwd.record_session_cwd(session["session_key"], str(sub))
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
     assert session["cwd"] == str(repo)
@@ -86,7 +86,7 @@ def test_browsing_outside_a_repo_is_not_a_move(session, repo_with_worktree, tmp_
     repo, _ = repo_with_worktree
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    terminal_tool.record_session_cwd(session["session_key"], str(scratch))
+    runtime_cwd.record_session_cwd(session["session_key"], str(scratch))
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
     assert session["cwd"] == str(repo)
@@ -96,7 +96,7 @@ def test_remote_backends_do_not_reanchor(session, repo_with_worktree, monkeypatc
     """A remote cwd names a path on the host, not one this gateway can probe."""
     repo, worktree = repo_with_worktree
     monkeypatch.setattr(server, "_is_local_terminal_backend", lambda: False)
-    terminal_tool.record_session_cwd(session["session_key"], str(worktree))
+    runtime_cwd.record_session_cwd(session["session_key"], str(worktree))
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
     assert session["cwd"] == str(repo)
@@ -109,7 +109,7 @@ def test_settled_session_info_reports_the_worktree_branch(
     _, worktree = repo_with_worktree
     emitted: list[tuple[str, str, dict]] = []
     monkeypatch.setattr(server, "_emit", lambda ev, sid, payload=None: emitted.append((ev, sid, payload or {})))
-    terminal_tool.record_session_cwd(session["session_key"], str(worktree))
+    runtime_cwd.record_session_cwd(session["session_key"], str(worktree))
 
     server._emit_settled_session_info("sid-1", session, agent=None)
 
@@ -123,16 +123,16 @@ def test_settled_session_info_reports_the_worktree_branch(
 def test_reconcile_ignores_a_foreign_sessions_record(session, repo_with_worktree):
     """cwd records are per session key — another chat's move must not leak in."""
     repo, worktree = repo_with_worktree
-    terminal_tool.record_session_cwd("someone-else", str(worktree))
+    runtime_cwd.record_session_cwd("someone-else", str(worktree))
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
     assert session["cwd"] == str(repo)
-    terminal_tool.clear_session_cwd("someone-else")
+    runtime_cwd.clear_recorded_session_cwd("someone-else")
 
 
 def test_os_normalized_paths_are_not_a_move(session, repo_with_worktree):
     """A trailing-slash / unnormalized record is the same dir, not a relocation."""
     repo, _ = repo_with_worktree
-    terminal_tool.record_session_cwd(session["session_key"], str(repo) + os.sep)
+    runtime_cwd.record_session_cwd(session["session_key"], str(repo) + os.sep)
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
