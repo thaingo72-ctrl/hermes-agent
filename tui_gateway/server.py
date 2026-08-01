@@ -11517,8 +11517,9 @@ def _browser_disconnect(rid) -> dict:
 
 
 # ── Split JSON-RPC handler modules ───────────────────────────────────
-# Billing, config, completion, and prompt register direct service-injected callables.
-# The remaining split modules still use method_ctx.py's legacy rebinding seam.
+# Billing, config, completion, prompt, session_lifecycle, and system register
+# direct service-injected callables. The remaining split modules still use
+# method_ctx.py's legacy rebinding seam.
 from . import (  # noqa: E402
     methods_billing as _methods_billing,
     methods_complete as _methods_complete,
@@ -11526,11 +11527,60 @@ from . import (  # noqa: E402
     methods_prompt as _methods_prompt,
     methods_session as _methods_session,
     methods_session_lifecycle as _methods_session_lifecycle,
+    methods_system as _methods_system,
     methods_tools as _methods_tools,
 )
 
+
+def _set_mcp_reload_gen(value: int) -> None:
+    global _mcp_reload_gen
+
+    _mcp_reload_gen = int(value)
+
+
+def _set_mcp_reload_loaded_rev(value: str) -> None:
+    global _mcp_reload_loaded_rev
+
+    _mcp_reload_loaded_rev = str(value)
+
+
+def _compute_mcp_rev() -> str:
+    return _methods_system._compute_mcp_rev(
+        _methods_system.SystemServices(
+            sessions=_sessions,
+            sessions_lock=_sessions_lock,
+            get_mcp_reload_lock=lambda: _mcp_reload_lock,
+            get_mcp_reload_gen=lambda: _mcp_reload_gen,
+            set_mcp_reload_gen=_set_mcp_reload_gen,
+            get_mcp_reload_loaded_rev=lambda: _mcp_reload_loaded_rev,
+            set_mcp_reload_loaded_rev=_set_mcp_reload_loaded_rev,
+            compute_mcp_rev=lambda: "",
+            skill_usage_lookup=lambda: _methods_complete._skill_usage_lookup(),
+            sess=lambda params, rid: _sess(params, rid),
+            load_cfg=lambda: _load_cfg(),
+            load_enabled_toolsets=lambda: _load_enabled_toolsets(),
+            session_uses_compute_host=lambda session: _session_uses_compute_host(session),
+            get_compute_host_supervisor=lambda: _get_compute_host_supervisor(),
+            emit=_emit,
+            session_info=lambda agent, session=None: _session_info(agent, session),
+            call_method=lambda name, rid, params: _methods[name](rid, params),
+            apply_model_switch=_apply_model_switch,
+            resolve_session_platform=lambda: _resolve_session_platform(),
+            skill_scaffold_projection=lambda content: _skill_scaffold_projection(content),
+            load_tool_progress_mode=lambda: _load_tool_progress_mode(),
+            get_db=lambda: _get_db(),
+            db_unavailable_error=lambda rid, **kwargs: _db_unavailable_error(rid, **kwargs),
+            compress_session_history=_compress_session_history,
+            sync_session_key_after_compress=_sync_session_key_after_compress,
+            send_compute_host_control=_send_compute_host_control,
+            apply_compute_host_metadata_mirror=_apply_compute_host_metadata_mirror,
+        )
+    )
+
+
 _billing_rpc_services = _methods_billing.default_billing_services(emit=_emit)
 _methods_billing.register(_methods, services=_billing_rpc_services)
+
 _completion_rpc_services = _methods_complete.CompletionServices(
     sessions=_sessions,
     hermes_home=lambda: _hermes_home,
@@ -11725,6 +11775,39 @@ _methods_session_lifecycle.register(
         set_session_cwd=lambda session, raw: _set_session_cwd(session, raw),
         stdio_transport=_stdio_transport,
         stored_session_runtime_overrides=lambda found: _stored_session_runtime_overrides(found),
+    ),
+)
+
+_methods_system.register(
+    _methods,
+    services=_methods_system.SystemServices(
+        sessions=_sessions,
+        sessions_lock=_sessions_lock,
+        get_mcp_reload_lock=lambda: _mcp_reload_lock,
+        get_mcp_reload_gen=lambda: _mcp_reload_gen,
+        set_mcp_reload_gen=_set_mcp_reload_gen,
+        get_mcp_reload_loaded_rev=lambda: _mcp_reload_loaded_rev,
+        set_mcp_reload_loaded_rev=_set_mcp_reload_loaded_rev,
+        compute_mcp_rev=lambda: _compute_mcp_rev(),
+        skill_usage_lookup=lambda: _methods_complete._skill_usage_lookup(),
+        sess=lambda params, rid: _sess(params, rid),
+        load_cfg=lambda: _load_cfg(),
+        load_enabled_toolsets=lambda: _load_enabled_toolsets(),
+        session_uses_compute_host=lambda session: _session_uses_compute_host(session),
+        get_compute_host_supervisor=lambda: _get_compute_host_supervisor(),
+        emit=_emit,
+        session_info=lambda agent, session=None: _session_info(agent, session),
+        call_method=lambda name, rid, params: _methods[name](rid, params),
+        apply_model_switch=_apply_model_switch,
+        resolve_session_platform=lambda: _resolve_session_platform(),
+        skill_scaffold_projection=lambda content: _skill_scaffold_projection(content),
+        load_tool_progress_mode=lambda: _load_tool_progress_mode(),
+        get_db=lambda: _get_db(),
+        db_unavailable_error=lambda rid, **kwargs: _db_unavailable_error(rid, **kwargs),
+        compress_session_history=_compress_session_history,
+        sync_session_key_after_compress=_sync_session_key_after_compress,
+        send_compute_host_control=_send_compute_host_control,
+        apply_compute_host_metadata_mirror=_apply_compute_host_metadata_mirror,
     ),
 )
 
