@@ -1,28 +1,50 @@
-"""Seam for the server.py @method handler split (mechanical move).
+"""Explicit dependency context for split TUI JSON-RPC handlers.
 
-server.py's ~130 JSON-RPC handlers close over its module globals
-(``_sessions``, ``_ok``, ``_err``, config helpers, ...).  To move them
-out of the 19K-line module without rewriting a single handler body,
-each ``methods_*`` module defines its handlers under a local
-:class:`HandlerRegistry` and server.py calls :meth:`HandlerRegistry.install`
-at the end of its own import, once every global the handlers close over
-exists.  ``install()`` rebinds each handler's ``__globals__`` to
-server.py's namespace with ``types.FunctionType``, so handler bodies
-stay byte-identical and ``global X`` statements inside handlers keep
-mutating server.py state exactly as before the split.
-
-No import cycle: ``methods_*`` modules never import server at module
-level — server imports them and passes itself to ``register()``.
+The split ``methods_*`` modules are intentionally importable without importing
+``server.py``.  Their handlers accept a context object as the first argument and
+resolve server-owned state/services through that object.  ``HandlerRegistry``
+adapts those contextful handlers to the JSON-RPC registry's ``(rid, params)``
+call shape without mutating function globals.
 """
 
-import types
+from collections.abc import Callable
+from typing import Any, Protocol
+
+
+class HandlerContext(Protocol):
+    """Server dependencies consumed by split handler modules.
+
+    ``server.py`` is the production context. Tests can pass a small fake context
+    exposing only the attributes exercised by a handler.
+    """
+
+    _methods: dict[str, Callable[[Any, dict], dict]]
+
+    def _ok(self, rid: Any, result: dict | None = None) -> dict: ...
+
+    def _err(self, rid: Any, code: int, message: str) -> dict: ...
+
+    def _profile_scoped(self, handler: Callable[[Any, dict], dict]) -> Callable[[Any, dict], dict]: ...
+
+
+class ContextualHandler:
+    """Callable adapter from JSON-RPC shape to a contextful handler."""
+
+    def __init__(self, ctx: HandlerContext, fn: Callable[[HandlerContext, Any, dict], dict]) -> None:
+        self.ctx = ctx
+        self.fn = fn
+        self.__name__ = getattr(fn, "__name__", type(self).__name__)
+        self.__doc__ = getattr(fn, "__doc__", None)
+
+    def __call__(self, rid: Any, params: dict) -> dict:
+        return self.fn(self.ctx, rid, params)
 
 
 class HandlerRegistry:
     """Deferred @method registrar used by the methods_* split modules."""
 
     def __init__(self) -> None:
-        self._pending: list[tuple[str, types.FunctionType]] = []
+        self._pending: list[tuple[str, Callable[[HandlerContext, Any, dict], dict]]] = []
 
     def method(self, name: str):
         """Drop-in for server.py's ``@method`` decorator (defers registration)."""
@@ -38,16 +60,10 @@ class HandlerRegistry:
         fn._hermes_profile_scoped = True
         return fn
 
-    def install(self, server) -> None:
-        """Rebind pending handlers onto ``server``'s globals and register them."""
-        g = vars(server)
+    def install(self, ctx: HandlerContext) -> None:
+        """Register pending handlers against an explicit dependency context."""
         for name, fn in self._pending:
-            real = types.FunctionType(
-                fn.__code__, g, fn.__name__, fn.__defaults__, fn.__closure__
-            )
-            real.__kwdefaults__ = fn.__kwdefaults__
-            real.__doc__ = fn.__doc__
-            real.__dict__.update(fn.__dict__)
+            real: Callable[[Any, dict], dict] = ContextualHandler(ctx, fn)
             if getattr(fn, "_hermes_profile_scoped", False):
-                real = server._profile_scoped(real)
-            server._methods[name] = real
+                real = ctx._profile_scoped(real)
+            ctx._methods[name] = real
