@@ -1,19 +1,111 @@
-"""Prompt / attachment / respond JSON-RPC handlers (moved verbatim from server.py).
+"""Prompt / attachment / respond JSON-RPC handlers for the TUI gateway."""
 
-Handler bodies are byte-identical to their pre-split server.py form; they
-are rebound onto server.py's globals at install time — see method_ctx.py.
-"""
+from __future__ import annotations
 
-from .method_ctx import HandlerRegistry
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable, Optional
 
-import types
+import logging
+import os
+import sys
+import threading
+import time
+import uuid
 
-_registry = HandlerRegistry()
-method = _registry.method
-_profile_scoped = _registry.profile_scoped
+from tui_gateway.transport import current_transport
+from utils import is_truthy_value
+
+logger = logging.getLogger(__name__)
 
 
-def _pending_reaction_notes(session: dict) -> str:
+@dataclass(frozen=True)
+class ReactionServices:
+    load_cfg: Callable[[], dict]
+    session_db: Callable[[dict], Any]
+
+
+@dataclass(frozen=True)
+class PromptSubmitServices:
+    sess_nowait: Callable[[dict, Any], tuple[dict | None, dict | None]]
+    ok: Callable[[Any, dict], dict]
+    err: Callable[[Any, int, str], dict]
+    voice_mode_enabled: Callable[[], bool]
+    tts_stream_stop: Callable[..., None]
+    voice_emit: Callable[[str, dict | None], None]
+    ensure_active_session_slot: Callable[[str, dict], Optional[str]]
+    expand_skill_invocation_for_replay: Callable[[str, str], str]
+    load_dashboard_process_isolation_config: Callable[[], Any]
+    session_uses_compute_host: Callable[[dict, Any], bool]
+    handle_busy_submit: Callable[..., Optional[dict]]
+    child_run_active: Callable[[str], bool]
+    get_db: Callable[[], Any]
+    start_inflight_turn: Callable[[dict, Any], None]
+    submit_prompt_to_compute_host: Callable[[Any, str, dict, Any], dict]
+    ensure_session_db_row: Callable[[dict], None]
+    persist_branch_seed: Callable[[dict], None]
+    clear_inflight_turn: Callable[[dict], None]
+    start_agent_build: Callable[[str, dict], None]
+    wait_agent_for_prompt: Callable[[dict, Any, str], dict | None]
+    emit_terminal_turn_error: Callable[[str, dict, str], None]
+    emit: Callable[[str, str, dict | None], None]
+    session_info: Callable[[Any, dict], dict]
+    run_prompt_submit: Callable[..., None]
+
+
+@dataclass(frozen=True)
+class AttachmentServices:
+    sess: Callable[[dict, Any], tuple[dict | None, dict | None]]
+    sess_nowait: Callable[[dict, Any], tuple[dict | None, dict | None]]
+    ok: Callable[[Any, dict], dict]
+    err: Callable[[Any, int, str], dict]
+    session_images_dir: Callable[[dict], Path]
+    image_meta: Callable[[Path], dict]
+    decode_attach_base64: Callable[..., bytes | None]
+    attach_bytes_max_bytes: Callable[[], int]
+    allowed_image_extensions: Callable[[], set[str]]
+    queue_attached_image: Callable[[dict, bytes, str], Path]
+    sniff_image_ext: Callable[[bytes, str], str]
+    pdf_attach_max_bytes: Callable[[], int]
+    pdf_attach_max_pages: Callable[[], int]
+    stage_session_file_attachment: Callable[..., tuple[Path, bool]]
+    attachment_ref_path: Callable[[dict, Path], str]
+    format_ref_value: Callable[[str], str]
+
+
+@dataclass(frozen=True)
+class BackgroundServices:
+    sess: Callable[[dict, Any], tuple[dict | None, dict | None]]
+    ok: Callable[[Any, dict], dict]
+    err: Callable[[Any, int, str], dict]
+    session_cwd: Callable[[dict], str]
+    set_session_context: Callable[..., Any]
+    clear_session_context: Callable[[Any], None]
+    background_agent_kwargs: Callable[[Any, str], dict]
+    preview_restart_history: Callable[[dict], list]
+    ephemeral_preview_agent_kwargs: Callable[[Any, str], dict]
+    preview_restart_callbacks: Callable[[str, str], dict]
+    emit: Callable[[str, str, dict | None], None]
+
+
+@dataclass(frozen=True)
+class ResponseServices:
+    ok: Callable[[Any, dict], dict]
+    err: Callable[[Any, int, str], dict]
+    prompt_lock: threading.Lock
+    pending: dict[str, tuple[str, threading.Event]]
+    answers: dict[str, str]
+
+
+@dataclass(frozen=True)
+class ApprovalServices:
+    sess: Callable[[dict, Any], tuple[dict | None, dict | None]]
+    ok: Callable[[Any, dict], dict]
+    err: Callable[[Any, int, str], dict]
+
+
+def pending_reaction_notes(session: dict, services: ReactionServices) -> str:
     """Note block describing reactions the user added since the last turn, or "".
 
     Applied to the MODEL INPUT only (``run_message``, beside the
@@ -29,14 +121,14 @@ def _pending_reaction_notes(session: dict) -> str:
     # Feature-gated (off by default, Settings → Appearance): when disabled the
     # model hears nothing, even about reactions set while it was on.
     try:
-        display = _load_cfg().get("display")
+        display = services.load_cfg().get("display")
         if not (isinstance(display, dict) and bool(display.get("message_reactions", False))):
             return ""
     except Exception:
         return ""
 
     try:
-        with _session_db(session) as db:
+        with services.session_db(session) as db:
             if db is None:
                 return ""
             pending = db.take_unseen_reactions(session_key, author="user")
@@ -64,8 +156,32 @@ def _pending_reaction_notes(session: dict) -> str:
     return "\n".join(notes)
 
 
-@method("prompt.submit")
-def _(rid, params: dict) -> dict:
+def prompt_submit(rid, params: dict, services: PromptSubmitServices) -> dict:
+    _sess_nowait = services.sess_nowait
+    _ok = services.ok
+    _err = services.err
+    _voice_mode_enabled = services.voice_mode_enabled
+    _tts_stream_stop = services.tts_stream_stop
+    _voice_emit = services.voice_emit
+    _ensure_active_session_slot = services.ensure_active_session_slot
+    _expand_skill_invocation_for_replay = services.expand_skill_invocation_for_replay
+    _load_dashboard_process_isolation_config = services.load_dashboard_process_isolation_config
+    _session_uses_compute_host = services.session_uses_compute_host
+    _handle_busy_submit = services.handle_busy_submit
+    _child_run_active = services.child_run_active
+    _get_db = services.get_db
+    _start_inflight_turn = services.start_inflight_turn
+    _submit_prompt_to_compute_host = services.submit_prompt_to_compute_host
+    _ensure_session_db_row = services.ensure_session_db_row
+    _persist_branch_seed = services.persist_branch_seed
+    _clear_inflight_turn = services.clear_inflight_turn
+    _start_agent_build = services.start_agent_build
+    _wait_agent_for_prompt = services.wait_agent_for_prompt
+    _emit_terminal_turn_error = services.emit_terminal_turn_error
+    _emit = services.emit
+    _session_info = services.session_info
+    _run_prompt_submit = services.run_prompt_submit
+
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
 
     sid = params.get("session_id", "")
@@ -312,8 +428,13 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"status": "streaming"})
 
 
-@method("clipboard.paste")
-def _(rid, params: dict) -> dict:
+def clipboard_paste(rid, params: dict, services: AttachmentServices) -> dict:
+    _sess = services.sess
+    _ok = services.ok
+    _err = services.err
+    _session_images_dir = services.session_images_dir
+    _image_meta = services.image_meta
+
     session, err = _sess(params, rid)
     if err:
         return err
@@ -352,8 +473,12 @@ def _(rid, params: dict) -> dict:
     )
 
 
-@method("image.attach")
-def _(rid, params: dict) -> dict:
+def image_attach(rid, params: dict, services: AttachmentServices) -> dict:
+    _sess = services.sess
+    _ok = services.ok
+    _err = services.err
+    _image_meta = services.image_meta
+
     session, err = _sess(params, rid)
     if err:
         return err
@@ -395,8 +520,17 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5027, str(e))
 
 
-@method("image.attach_bytes")
-def _(rid, params: dict) -> dict:
+def image_attach_bytes(rid, params: dict, services: AttachmentServices) -> dict:
+    _sess = services.sess
+    _ok = services.ok
+    _err = services.err
+    _decode_attach_base64 = services.decode_attach_base64
+    _ATTACH_BYTES_MAX_BYTES = services.attach_bytes_max_bytes()
+    _sniff_image_ext = services.sniff_image_ext
+    _allowed_image_extensions = services.allowed_image_extensions
+    _queue_attached_image = services.queue_attached_image
+    _image_meta = services.image_meta
+
     """Attach an image to the session from base64 bytes (remote-client path).
 
     A desktop app or web dashboard running on a DIFFERENT machine than the
@@ -456,8 +590,16 @@ def _(rid, params: dict) -> dict:
     )
 
 
-@method("pdf.attach")
-def _(rid, params: dict) -> dict:
+def pdf_attach(rid, params: dict, services: AttachmentServices) -> dict:
+    _sess = services.sess
+    _ok = services.ok
+    _err = services.err
+    _decode_attach_base64 = services.decode_attach_base64
+    _PDF_ATTACH_MAX_BYTES = services.pdf_attach_max_bytes()
+    _PDF_ATTACH_MAX_PAGES = services.pdf_attach_max_pages()
+    _queue_attached_image = services.queue_attached_image
+    _image_meta = services.image_meta
+
     """Attach a PDF by rendering each page to PNG and queuing the pages.
 
     Anthropic's vision pipeline accepts images, not PDFs, so this runs
@@ -582,8 +724,14 @@ def _(rid, params: dict) -> dict:
         )
 
 
-@method("file.attach")
-def _(rid, params: dict) -> dict:
+def file_attach(rid, params: dict, services: AttachmentServices) -> dict:
+    _sess = services.sess
+    _ok = services.ok
+    _err = services.err
+    _stage_session_file_attachment = services.stage_session_file_attachment
+    _attachment_ref_path = services.attachment_ref_path
+    _format_ref_value = services.format_ref_value
+
     """Stage a non-image file attachment into the session workspace.
 
     The image/PDF path renders to vision tiles; this one keeps the file as a
@@ -629,8 +777,11 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5028, str(e))
 
 
-@method("image.detach")
-def _(rid, params: dict) -> dict:
+def image_detach(rid, params: dict, services: AttachmentServices) -> dict:
+    _sess = services.sess
+    _ok = services.ok
+    _err = services.err
+
     session, err = _sess(params, rid)
     if err:
         return err
@@ -649,8 +800,12 @@ def _(rid, params: dict) -> dict:
     )
 
 
-@method("input.detect_drop")
-def _(rid, params: dict) -> dict:
+def input_detect_drop(rid, params: dict, services: AttachmentServices) -> dict:
+    _sess_nowait = services.sess_nowait
+    _ok = services.ok
+    _err = services.err
+    _image_meta = services.image_meta
+
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -696,8 +851,16 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5027, str(e))
 
 
-@method("prompt.background")
-def _(rid, params: dict) -> dict:
+def prompt_background(rid, params: dict, services: BackgroundServices) -> dict:
+    _sess = services.sess
+    _ok = services.ok
+    _err = services.err
+    _session_cwd = services.session_cwd
+    _set_session_context = services.set_session_context
+    _clear_session_context = services.clear_session_context
+    _background_agent_kwargs = services.background_agent_kwargs
+    _emit = services.emit
+
     session, err = _sess(params, rid)
     if err:
         return err
@@ -742,8 +905,18 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"task_id": task_id})
 
 
-@method("preview.restart")
-def _(rid, params: dict) -> dict:
+def preview_restart(rid, params: dict, services: BackgroundServices) -> dict:
+    _sess = services.sess
+    _ok = services.ok
+    _err = services.err
+    _preview_restart_history = services.preview_restart_history
+    _session_cwd = services.session_cwd
+    _set_session_context = services.set_session_context
+    _ephemeral_preview_agent_kwargs = services.ephemeral_preview_agent_kwargs
+    _preview_restart_callbacks = services.preview_restart_callbacks
+    _clear_session_context = services.clear_session_context
+    _emit = services.emit
+
     session, err = _sess(params, rid)
     if err:
         return err
@@ -855,36 +1028,35 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"task_id": task_id})
 
 
-@method("clarify.respond")
-def _(rid, params: dict) -> dict:
+def clarify_respond(rid, params: dict, services: ResponseServices) -> dict:
     # allow_expired=True: a clarify can time out server-side (its entry is popped
     # from _pending) while the card is still visible — common when a WebSocket
     # reconnect during the wait drops tool.complete. A late answer must resolve
     # gracefully instead of hitting the raw 4009 "no pending answer request".
-    return _respond(rid, params, "answer", allow_expired=True)
+    return respond(rid, params, "answer", services, allow_expired=True)
 
 
-@method("terminal.read.respond")
-def _(rid, params: dict) -> dict:
+def terminal_read_respond(rid, params: dict, services: ResponseServices) -> dict:
     # `text` is a JSON string of the serialized terminal buffer + line metadata.
     # allow_expired=True: the read_terminal tool's _block() uses a short 30s
     # timeout, so a slow renderer losing the race is the common case — a late
     # response must not error after the tool already returned empty.
-    return _respond(rid, params, "text", allow_expired=True)
+    return respond(rid, params, "text", services, allow_expired=True)
 
 
-@method("sudo.respond")
-def _(rid, params: dict) -> dict:
-    return _respond(rid, params, "password", allow_expired=True)
+def sudo_respond(rid, params: dict, services: ResponseServices) -> dict:
+    return respond(rid, params, "password", services, allow_expired=True)
 
 
-@method("secret.respond")
-def _(rid, params: dict) -> dict:
-    return _respond(rid, params, "value", allow_expired=True)
+def secret_respond(rid, params: dict, services: ResponseServices) -> dict:
+    return respond(rid, params, "value", services, allow_expired=True)
 
 
-@method("approval.respond")
-def _(rid, params: dict) -> dict:
+def approval_respond(rid, params: dict, services: ApprovalServices) -> dict:
+    _sess = services.sess
+    _ok = services.ok
+    _err = services.err
+
     session, err = _sess(params, rid)
     if err:
         return err
@@ -905,16 +1077,80 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5004, str(e))
 
 
-def register(server) -> None:
-    """Bind this module's handlers onto ``server``'s globals and registry."""
-    _registry.install(server)
-    # Module-level helpers aren't @method handlers, so install() doesn't see
-    # them — but server.py's run path calls this one (run_message enrichment,
-    # beside the speech-interrupted note). Rebind and publish it the same way.
-    server._pending_reaction_notes = types.FunctionType(
-        _pending_reaction_notes.__code__,
-        vars(server),
-        _pending_reaction_notes.__name__,
-        _pending_reaction_notes.__defaults__,
-        _pending_reaction_notes.__closure__,
+def respond(
+    rid,
+    params: dict,
+    key: str,
+    services: ResponseServices,
+    *,
+    allow_expired: bool = False,
+) -> dict:
+    r = params.get("request_id", "")
+    with services.prompt_lock:
+        entry = services.pending.get(r)
+        if not entry:
+            if allow_expired and r:
+                return services.ok(rid, {"status": "expired"})
+            return services.err(rid, 4009, f"no pending {key} request")
+        _, ev = entry
+        services.answers[r] = params.get(key, "")
+        ev.set()
+    return services.ok(rid, {"status": "ok"})
+
+
+def register(
+    methods: dict[str, Callable[[Any, dict], dict]],
+    *,
+    prompt_submit_services: PromptSubmitServices,
+    attachment_services: AttachmentServices,
+    background_services: BackgroundServices,
+    response_services: ResponseServices,
+    approval_services: ApprovalServices,
+) -> None:
+    """Register ordinary prompt-domain callables under existing JSON-RPC names."""
+
+    methods["prompt.submit"] = lambda rid, params: prompt_submit(
+        rid, params, prompt_submit_services
+    )
+    methods["clipboard.paste"] = lambda rid, params: clipboard_paste(
+        rid, params, attachment_services
+    )
+    methods["image.attach"] = lambda rid, params: image_attach(
+        rid, params, attachment_services
+    )
+    methods["image.attach_bytes"] = lambda rid, params: image_attach_bytes(
+        rid, params, attachment_services
+    )
+    methods["pdf.attach"] = lambda rid, params: pdf_attach(
+        rid, params, attachment_services
+    )
+    methods["file.attach"] = lambda rid, params: file_attach(
+        rid, params, attachment_services
+    )
+    methods["image.detach"] = lambda rid, params: image_detach(
+        rid, params, attachment_services
+    )
+    methods["input.detect_drop"] = lambda rid, params: input_detect_drop(
+        rid, params, attachment_services
+    )
+    methods["prompt.background"] = lambda rid, params: prompt_background(
+        rid, params, background_services
+    )
+    methods["preview.restart"] = lambda rid, params: preview_restart(
+        rid, params, background_services
+    )
+    methods["clarify.respond"] = lambda rid, params: clarify_respond(
+        rid, params, response_services
+    )
+    methods["terminal.read.respond"] = lambda rid, params: terminal_read_respond(
+        rid, params, response_services
+    )
+    methods["sudo.respond"] = lambda rid, params: sudo_respond(
+        rid, params, response_services
+    )
+    methods["secret.respond"] = lambda rid, params: secret_respond(
+        rid, params, response_services
+    )
+    methods["approval.respond"] = lambda rid, params: approval_respond(
+        rid, params, approval_services
     )

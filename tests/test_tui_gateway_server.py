@@ -9724,6 +9724,90 @@ def test_respond_unpacks_sid_tuple_correctly():
         server._answers.pop("rid-x", None)
 
 
+def test_prompt_rpc_handlers_are_owned_by_prompt_module():
+    """Prompt-domain RPCs stay ordinary callables owned by methods_prompt.
+
+    This guards against the old HandlerRegistry/FunctionType rebinding path:
+    handle_request must still dispatch the public RPC names, but the registered
+    handlers should remain canonical methods_prompt functions/lambdas.
+    """
+    import tui_gateway.methods_prompt as methods_prompt
+
+    assert "HandlerRegistry" not in methods_prompt.__dict__
+    prompt_methods = {
+        "prompt.submit",
+        "clipboard.paste",
+        "image.attach",
+        "image.attach_bytes",
+        "pdf.attach",
+        "file.attach",
+        "image.detach",
+        "input.detect_drop",
+        "prompt.background",
+        "preview.restart",
+        "clarify.respond",
+        "terminal.read.respond",
+        "sudo.respond",
+        "secret.respond",
+        "approval.respond",
+    }
+    for rpc_name in prompt_methods:
+        handler = server._methods[rpc_name]
+        assert handler.__module__ == methods_prompt.__name__
+
+    missing = server.handle_request(
+        {
+            "id": "contract",
+            "method": "clarify.respond",
+            "params": {"request_id": "missing", "answer": "late"},
+        }
+    )
+    assert missing["result"] == {"status": "expired"}
+
+
+def test_response_rpcs_resolve_concurrent_requests_via_handle_request():
+    """Representative response handlers must not share request scratch state."""
+    entries = {
+        "clarify-1": ("sid-a", threading.Event(), "clarify.respond", "answer", "yes"),
+        "terminal-1": ("sid-b", threading.Event(), "terminal.read.respond", "text", "screen"),
+        "sudo-1": ("sid-c", threading.Event(), "sudo.respond", "password", "pw"),
+        "secret-1": ("sid-d", threading.Event(), "secret.respond", "value", "token"),
+    }
+    for request_id, (sid, ev, *_rest) in entries.items():
+        server._pending[request_id] = (sid, ev)
+
+    responses = {}
+
+    def call(request_id, method, key, value):
+        responses[request_id] = server.handle_request(
+            {
+                "id": request_id,
+                "method": method,
+                "params": {"request_id": request_id, key: value},
+            }
+        )
+
+    threads = [
+        threading.Thread(target=call, args=(request_id, method, key, value))
+        for request_id, (_sid, _ev, method, key, value) in entries.items()
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert set(responses) == set(entries)
+        for request_id, (_sid, ev, _method, _key, value) in entries.items():
+            assert responses[request_id]["result"] == {"status": "ok"}
+            assert ev.is_set()
+            assert server._answers[request_id] == value
+    finally:
+        for request_id in entries:
+            server._pending.pop(request_id, None)
+            server._answers.pop(request_id, None)
+
+
 # ---------------------------------------------------------------------------
 # /model switch and other agent-mutating commands must reject while the
 # session is running.  agent.switch_model() mutates self.model, self.provider,
