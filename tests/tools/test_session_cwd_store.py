@@ -1,57 +1,56 @@
-"""Session-cwd record store (cwd rearchitecture, step 1: dual-write).
+"""Session-cwd record store behavior.
 
-The store is the future single source of truth for per-session working
-directories. Step 1 only guarantees the WRITE side: every path that learns a
-session's live cwd must record it under the raw session key. Readers still
-use the legacy env.cwd ladder; these tests pin the invariants the later
-read-side flip will rely on.
+The runtime store is the single source of truth for per-session working
+directories. Terminal and file tools read records by raw session key so
+sessions sharing one backend keep isolated cwd state.
 """
 
 import pytest
 
+import agent.runtime_cwd as runtime_cwd
 import tools.terminal_tool as tt
 
 
 @pytest.fixture(autouse=True)
 def _clean_store(monkeypatch):
-    monkeypatch.setattr(tt, "_session_cwd", {})
+    monkeypatch.setattr(runtime_cwd, "_SESSION_CWD_RECORDS", {})
     monkeypatch.setattr(tt, "_task_env_overrides", {})
 
 
 class TestRecordSemantics:
     def test_records_are_keyed_by_raw_session_key(self):
-        tt.record_session_cwd("sess-a", "/wt/a")
-        tt.record_session_cwd("sess-b", "/wt/b")
+        runtime_cwd.record_session_cwd("sess-a", "/wt/a")
+        runtime_cwd.record_session_cwd("sess-b", "/wt/b")
         # No cross-talk: each session reads back exactly its own record.
-        assert tt.get_session_cwd("sess-a") == "/wt/a"
-        assert tt.get_session_cwd("sess-b") == "/wt/b"
-        assert tt.get_session_cwd("sess-c") is None
+        assert runtime_cwd.get_recorded_session_cwd("sess-a") == "/wt/a"
+        assert runtime_cwd.get_recorded_session_cwd("sess-b") == "/wt/b"
+        assert runtime_cwd.get_recorded_session_cwd("sess-c") is None
 
 
     def test_clear_drops_only_the_named_session(self):
-        tt.record_session_cwd("sess-a", "/wt/a")
-        tt.record_session_cwd("sess-b", "/wt/b")
-        tt.clear_session_cwd("sess-a")
-        assert tt.get_session_cwd("sess-a") is None
-        assert tt.get_session_cwd("sess-b") == "/wt/b"
+        runtime_cwd.record_session_cwd("sess-a", "/wt/a")
+        runtime_cwd.record_session_cwd("sess-b", "/wt/b")
+        runtime_cwd.clear_recorded_session_cwd("sess-a")
+        assert runtime_cwd.get_recorded_session_cwd("sess-a") is None
+        assert runtime_cwd.get_recorded_session_cwd("sess-b") == "/wt/b"
 
 
-class TestDualWriteSites:
+class TestWorkspaceRegistration:
     def test_register_cwd_override_seeds_the_session_record(self):
         """A registered workspace cwd IS the session's cwd until a `cd`."""
         tt.register_task_env_overrides("desktop-sess", {"cwd": "/wt/desktop"})
-        assert tt.get_session_cwd("desktop-sess") == "/wt/desktop"
+        assert runtime_cwd.get_recorded_session_cwd("desktop-sess") == "/wt/desktop"
 
 
     def test_reregistration_updates_the_record(self):
         """ACP session/load switching project roots mid-session."""
         tt.register_task_env_overrides("acp-sess", {"cwd": "/proj/one"})
         tt.register_task_env_overrides("acp-sess", {"cwd": "/proj/two"})
-        assert tt.get_session_cwd("acp-sess") == "/proj/two"
+        assert runtime_cwd.get_recorded_session_cwd("acp-sess") == "/proj/two"
 
 
-class TestPostCommandDualWrite:
-    """The env's post-command cwd tracking must mirror into the session record."""
+class TestPostCommandRecording:
+    """The env's post-command cwd tracking must update the session record."""
 
     def _run(self, monkeypatch, task_id, env):
         import json
@@ -79,9 +78,9 @@ class TestPostCommandDualWrite:
 
         result = self._run(monkeypatch, "sess-a", FakeEnv())
         assert result["exit_code"] == 0
-        assert tt.get_session_cwd("sess-a") == "/new/dir"
+        assert runtime_cwd.get_recorded_session_cwd("sess-a") == "/new/dir"
         # And ONLY that session's record was touched.
-        assert tt.get_session_cwd("sess-b") is None
+        assert runtime_cwd.get_recorded_session_cwd("sess-b") is None
 
     def test_envs_without_cwd_tracking_record_nothing(self, monkeypatch):
         class FakeEnv:
@@ -91,11 +90,11 @@ class TestPostCommandDualWrite:
 
         result = self._run(monkeypatch, "sess-a", FakeEnv())
         assert result["exit_code"] == 0
-        assert tt.get_session_cwd("sess-a") is None
+        assert runtime_cwd.get_recorded_session_cwd("sess-a") is None
 
 
 class TestFileToolsReadTheRecord:
-    """Step 2: file-tool path resolution prefers the session's own record."""
+    """File-tool path resolution prefers the session's own record."""
 
     def test_two_sessions_resolve_into_their_own_recorded_cwds(self, tmp_path, monkeypatch):
         import tools.file_tools as ft
@@ -111,8 +110,8 @@ class TestFileToolsReadTheRecord:
 
         # Each session ran commands that recorded its own cwd. No env alive,
         # no registered overrides — just the records.
-        tt.record_session_cwd("sess-a", str(wt_a))
-        tt.record_session_cwd("sess-b", str(wt_b))
+        runtime_cwd.record_session_cwd("sess-a", str(wt_a))
+        runtime_cwd.record_session_cwd("sess-b", str(wt_b))
 
         assert ft._resolve_path_for_task("f.py", task_id="sess-a") == (wt_a / "f.py")
         assert ft._resolve_path_for_task("f.py", task_id="sess-b") == (wt_b / "f.py")
@@ -134,7 +133,7 @@ class TestFileToolsReadTheRecord:
             cwd = str(wt_b)  # another session's leftover cd on the shared env
 
         monkeypatch.setattr(tt, "_active_environments", {"default": _Env()})
-        tt.record_session_cwd("sess-a", str(wt_a))
+        runtime_cwd.record_session_cwd("sess-a", str(wt_a))
 
         resolved = ft._resolve_path_for_task("f.py", task_id="sess-a")
         assert resolved == (wt_a / "f.py")
@@ -143,22 +142,22 @@ class TestFileToolsReadTheRecord:
 
 class TestDelegateSeedsChildRecord:
     def test_child_record_seeded_from_parent_then_isolated(self):
-        tt.record_session_cwd("parent-task", "/parent/worktree")
+        runtime_cwd.record_session_cwd("parent-task", "/parent/worktree")
         # what delegate_tool does at spawn:
-        tt.record_session_cwd("child-1", tt.get_session_cwd("parent-task"))
+        runtime_cwd.record_session_cwd("child-1", runtime_cwd.get_recorded_session_cwd("parent-task"))
 
-        assert tt.get_session_cwd("child-1") == "/parent/worktree"
+        assert runtime_cwd.get_recorded_session_cwd("child-1") == "/parent/worktree"
         # child cds somewhere; parent record must be untouched.
-        tt.record_session_cwd("child-1", "/child/scratch")
-        assert tt.get_session_cwd("parent-task") == "/parent/worktree"
-        assert tt.get_session_cwd("child-1") == "/child/scratch"
+        runtime_cwd.record_session_cwd("child-1", "/child/scratch")
+        assert runtime_cwd.get_recorded_session_cwd("parent-task") == "/parent/worktree"
+        assert runtime_cwd.get_recorded_session_cwd("child-1") == "/child/scratch"
 
 
 class TestCommandCwdReadsTheRecord:
     """_resolve_command_cwd: workdir > session record > default. Nothing else."""
 
     def test_record_beats_default(self):
-        tt.record_session_cwd("sess-a", "/my/worktree")
+        runtime_cwd.record_session_cwd("sess-a", "/my/worktree")
         resolved = tt._resolve_command_cwd(
             workdir=None,
             default_cwd="/config/default",
@@ -168,7 +167,7 @@ class TestCommandCwdReadsTheRecord:
 
 
     def test_other_sessions_record_is_not_consulted(self):
-        tt.record_session_cwd("sess-b", "/other/worktree")
+        runtime_cwd.record_session_cwd("sess-b", "/other/worktree")
         resolved = tt._resolve_command_cwd(
             workdir=None,
             default_cwd="/config/default",
@@ -203,6 +202,17 @@ class TestCommandCwdReadsTheRecord:
         )
 
         json.loads(tt.terminal_tool(command="cd /project", task_id="sess-a"))
-        assert tt.get_session_cwd("sess-a") == "/project"
+        assert runtime_cwd.get_recorded_session_cwd("sess-a") == "/project"
         json.loads(tt.terminal_tool(command="pwd", task_id="sess-a"))
         assert fake.last_cwd_arg == "/project"
+
+
+class TestSessionCleanup:
+    def test_cleanup_vm_drops_only_the_named_session_record(self):
+        runtime_cwd.record_session_cwd("sess-a", "/wt/a")
+        runtime_cwd.record_session_cwd("sess-b", "/wt/b")
+
+        tt.cleanup_vm("sess-a")
+
+        assert runtime_cwd.get_recorded_session_cwd("sess-a") is None
+        assert runtime_cwd.get_recorded_session_cwd("sess-b") == "/wt/b"

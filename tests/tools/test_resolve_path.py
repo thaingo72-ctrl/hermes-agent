@@ -4,6 +4,14 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+import agent.runtime_cwd as runtime_cwd
+
+
+@pytest.fixture(autouse=True)
+def _clean_runtime_cwd(monkeypatch):
+    monkeypatch.setattr(runtime_cwd, "_SESSION_CWD_RECORDS", {})
+
 
 class TestResolvePath:
     """Verify _resolve_path respects TERMINAL_CWD for worktree isolation."""
@@ -29,11 +37,11 @@ class TestResolvePath:
 
         task_id = "live-cwd"
         # The session's completed `cd` recorded the new directory.
-        terminal_tool.record_session_cwd(task_id, str(live_dir))
+        runtime_cwd.record_session_cwd(task_id, str(live_dir))
 
         try:
             result = file_tools._resolve_path("nested/file.txt", task_id=task_id)
         finally:
-            terminal_tool.clear_session_cwd(task_id)
+            runtime_cwd.clear_recorded_session_cwd(task_id)
 
         assert result == live_dir / "nested" / "file.txt"

@@ -2293,9 +2293,9 @@ def _reconcile_session_cwd_from_terminal(session: dict | None) -> bool:
         return False
 
     try:
-        from tools.terminal_tool import get_session_cwd
+        from agent.runtime_cwd import get_recorded_session_cwd
 
-        recorded = get_session_cwd(session.get("session_key") or "")
+        recorded = get_recorded_session_cwd(session.get("session_key") or "")
     except Exception:
         return False
 

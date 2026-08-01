@@ -6,11 +6,20 @@ handling without requiring a running terminal environment.
 
 import json
 import logging
+import os
 from unittest.mock import MagicMock, patch
+
+import pytest
+import agent.runtime_cwd as runtime_cwd
 
 from tools.file_tools import (
     PATCH_SCHEMA,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clean_runtime_cwd(monkeypatch):
+    monkeypatch.setattr(runtime_cwd, "_SESSION_CWD_RECORDS", {})
 
 
 class TestReadFileHandler:
@@ -27,7 +36,7 @@ class TestReadFileHandler:
         result = json.loads(read_file_tool("/tmp/test.txt"))
         assert result["content"] == "line1\nline2"
         assert result["total_lines"] == 2
-        mock_ops.read_file.assert_called_once_with("/tmp/test.txt", 1, 500)
+        mock_ops.read_file.assert_called_once_with(os.path.realpath("/tmp/test.txt"), 1, 500)
 
 
     @patch("tools.file_tools._get_file_ops")
@@ -52,7 +61,7 @@ class TestWriteFileHandler:
         from tools.file_tools import write_file_tool
         result = json.loads(write_file_tool("/tmp/out.txt", "hello world!\n"))
         assert result["status"] == "ok"
-        mock_ops.write_file.assert_called_once_with("/tmp/out.txt", "hello world!\n")
+        mock_ops.write_file.assert_called_once_with(os.path.realpath("/tmp/out.txt"), "hello world!\n")
 
     @patch("tools.file_tools._get_file_ops")
     def test_permission_error_returns_error_json_without_error_log(self, mock_get, caplog):
@@ -143,7 +152,7 @@ class TestPatchHandler:
             old_string="foo", new_string="bar"
         ))
         assert result["status"] == "ok"
-        mock_ops.patch_replace.assert_called_once_with("/tmp/f.py", "foo", "bar", False)
+        mock_ops.patch_replace.assert_called_once_with(os.path.realpath("/tmp/f.py"), "foo", "bar", False)
 
 
     @patch("tools.file_tools._get_file_ops")
@@ -535,7 +544,7 @@ class TestSessionCwdSurvivesEnvRecreation:
         task_id = "default"
         # The session's record holds the directory (written by the last
         # completed terminal command before the env was cleaned up).
-        tt.record_session_cwd(task_id, "/Users/user/project")
+        runtime_cwd.record_session_cwd(task_id, "/Users/user/project")
         try:
             _get_file_ops(task_id)
 
@@ -551,24 +560,22 @@ class TestSessionCwdSurvivesEnvRecreation:
             assert cwd_passed == "/Users/user/project", \
                 f"Expected cwd='/Users/user/project', got {cwd_passed!r}"
         finally:
-            tt.clear_session_cwd(task_id)
+            runtime_cwd.clear_recorded_session_cwd(task_id)
 
 
     @patch("tools.terminal_tool._active_environments", new_callable=dict)
     @patch("tools.file_tools._file_ops_cache", new_callable=dict)
     @patch("tools.terminal_tool._get_env_config")
     @patch("tools.terminal_tool._create_environment")
-    def test_stale_cache_cwd_rescued_into_record_on_cleanup_detection(
+    def test_stale_cache_cwd_is_not_rescued_into_session_record(
         self, mock_create_env, mock_config, mock_cache, mock_active
     ):
-        """If the env died but the file-ops cache entry survived, its cwd is
-        rescued into the session record before the cache entry is dropped —
-        the recreated env starts where the user left off."""
+        """A stale shared file-ops cache must not stamp session cwd state."""
         import tools.terminal_tool as tt
         from tools.file_tools import _get_file_ops
 
         task_id = "default"
-        tt.clear_session_cwd(task_id)
+        runtime_cwd.clear_recorded_session_cwd(task_id)
 
         # Stale cache entry: env was cleaned up, cache still holds the old cwd.
         cached = MagicMock()
@@ -597,11 +604,11 @@ class TestSessionCwdSurvivesEnvRecreation:
                 if len(args) >= 3:
                     cwd_passed = args[2]
 
-            # Rebuilt env restored the rescued cwd, NOT the config default.
-            assert cwd_passed == "/Users/user/project", \
-                f"Expected restored cwd='/Users/user/project', got {cwd_passed!r}"
+            assert cwd_passed == "/config/default/path", \
+                f"Expected cwd='/config/default/path', got {cwd_passed!r}"
+            assert runtime_cwd.get_recorded_session_cwd(task_id) is None
         finally:
-            tt.clear_session_cwd(task_id)
+            runtime_cwd.clear_recorded_session_cwd(task_id)
 
 
 class TestSilentFileMisplacementE2E:
@@ -632,13 +639,13 @@ class TestSilentFileMisplacementE2E:
         )
 
         task_id = "default"
-        tt.clear_session_cwd(task_id)
+        runtime_cwd.clear_recorded_session_cwd(task_id)
 
         # 1) Env alive; agent has cd'd into the project (the completed command
         #    recorded the session cwd — simulate that write here).
         fo = ft._get_file_ops(task_id)
         fo.env.cwd = str(project)
-        tt.record_session_cwd(task_id, str(project))
+        runtime_cwd.record_session_cwd(task_id, str(project))
         ft.write_file_tool("alive.txt", "1\n", task_id)
         assert (project / "alive.txt").exists()
 
@@ -656,4 +663,4 @@ class TestSilentFileMisplacementE2E:
         assert not (config_default / "report.txt").exists(), \
             "file silently misplaced into config default (the #26211 bug)"
 
-        tt.clear_session_cwd(task_id)
+        runtime_cwd.clear_recorded_session_cwd(task_id)

@@ -12,6 +12,7 @@ contextvar; CLI/cron fall through to `TERMINAL_CWD`/launch cwd.
 
 import logging
 import os
+import threading
 from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 _UNSET: Any = object()
 
 _SESSION_CWD: ContextVar = ContextVar("HERMES_SESSION_CWD", default=_UNSET)
+
+_SESSION_CWD_RECORDS: dict[str, str] = {}
+_SESSION_CWD_RECORDS_LOCK = threading.Lock()
 
 # The Python package/source root (this file lives at <root>/agent/runtime_cwd.py).
 # When a backend is launched from, or self-spawns into, this tree (the desktop
@@ -55,6 +59,30 @@ def _session_cwd_override() -> str:
     if value is _UNSET:
         return ""
     return str(value).strip()
+
+
+def _record_key(session_key: str | None) -> str:
+    return str(session_key or "default")
+
+
+def record_session_cwd(session_key: str | None, cwd: str | None) -> None:
+    """Record the authoritative cwd for one raw session/task key."""
+    if not isinstance(cwd, str) or not cwd.strip():
+        return
+    with _SESSION_CWD_RECORDS_LOCK:
+        _SESSION_CWD_RECORDS[_record_key(session_key)] = cwd
+
+
+def get_recorded_session_cwd(session_key: str | None) -> str | None:
+    """Return the recorded cwd for one raw session/task key, with no fallback."""
+    with _SESSION_CWD_RECORDS_LOCK:
+        return _SESSION_CWD_RECORDS.get(_record_key(session_key))
+
+
+def clear_recorded_session_cwd(session_key: str | None) -> None:
+    """Drop only one raw session/task key's cwd record."""
+    with _SESSION_CWD_RECORDS_LOCK:
+        _SESSION_CWD_RECORDS.pop(_record_key(session_key), None)
 
 
 def resolve_agent_cwd() -> Path:

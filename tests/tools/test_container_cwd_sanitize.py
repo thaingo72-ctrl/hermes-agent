@@ -18,6 +18,7 @@ behaviour so neither path can regress.
 """
 
 import tools.terminal_tool as tt
+import agent.runtime_cwd as runtime_cwd
 
 
 class TestIsUnusableContainerCwd:
@@ -179,7 +180,7 @@ class TestFileOpsCwdSanitizedAtCallSite:
         monkeypatch.setattr(tt, "_active_environments", {})
         monkeypatch.setattr(tt, "_last_activity", {})
         monkeypatch.setattr(ft, "_file_ops_cache", {})
-        monkeypatch.setattr(tt, "_session_cwd", {})
+        monkeypatch.setattr(runtime_cwd, "_SESSION_CWD_RECORDS", {})
 
         task_id = "sess-fileops-host-cwd"
         tt.register_task_env_overrides(task_id, {"cwd": override_cwd})

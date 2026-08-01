@@ -274,7 +274,7 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
 
     Resolution:
 
-      1. The session's own cwd RECORD (``terminal_tool.get_session_cwd``) —
+      1. The session's own cwd record (``agent.runtime_cwd``) —
          written on every completed terminal command and seeded by workspace
          registration, keyed by the raw session id. Because the record is
          per-session, one session's ``cd`` can never leak into another
@@ -290,9 +290,9 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
     case callers fall back to the process cwd.
     """
     try:
-        from tools.terminal_tool import get_session_cwd
+        from agent.runtime_cwd import get_recorded_session_cwd
 
-        recorded = get_session_cwd(task_id)
+        recorded = get_recorded_session_cwd(task_id)
     except Exception:
         recorded = None
     if recorded:
@@ -571,6 +571,7 @@ _SENSITIVE_PATH_PREFIXES = (
     "/private/etc/", "/private/var/",
 )
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
+_MACOS_USER_TEMP_PREFIXES = ("/private/var/folders/", "/var/folders/")
 
 _hermes_config_resolved: str | None = None
 _hermes_config_resolved_loaded = False
@@ -604,11 +605,6 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
     )
-    for prefix in _SENSITIVE_PATH_PREFIXES:
-        if resolved.startswith(prefix) or normalized.startswith(prefix):
-            return _err
-    if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
-        return _err
     # Prevent agents from modifying the Hermes config file directly.
     # approvals.mode and other security settings live here; a malicious or
     # prompt-injected agent could silently disable exec approval by writing to
@@ -620,6 +616,16 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             "Agent cannot modify security-sensitive configuration. "
             "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
         )
+    for prefix in _SENSITIVE_PATH_PREFIXES:
+        if prefix == "/private/var/" and (
+            resolved.startswith(_MACOS_USER_TEMP_PREFIXES)
+            or normalized.startswith(_MACOS_USER_TEMP_PREFIXES)
+        ):
+            continue
+        if resolved.startswith(prefix) or normalized.startswith(prefix):
+            return _err
+    if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
+        return _err
     return None
 
 
@@ -964,18 +970,6 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                 _last_activity[task_id] = time.time()
                 return cached
             else:
-                # Environment was cleaned up -- preserve the old cwd in the
-                # session record before invalidating the stale cache entry
-                # (fixes #26211: silent file-creation failures in long-running
-                # conversations). Usually a no-op: every completed command
-                # already recorded its cwd.
-                old_cwd = getattr(cached, "cwd", None)
-                if old_cwd:
-                    try:
-                        from tools.terminal_tool import record_session_cwd
-                        record_session_cwd(raw_task_id, old_cwd)
-                    except Exception:
-                        pass
                 with _file_ops_lock:
                     _file_ops_cache.pop(task_id, None)
 
@@ -1014,8 +1008,8 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                 image = ""
 
             try:
-                from tools.terminal_tool import get_session_cwd
-                recorded_cwd = get_session_cwd(raw_task_id)
+                from agent.runtime_cwd import get_recorded_session_cwd
+                recorded_cwd = get_recorded_session_cwd(raw_task_id)
             except Exception:
                 recorded_cwd = None
             cwd = overrides.get("cwd") or recorded_cwd or config["cwd"]
@@ -1263,7 +1257,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         # ── Perform the read ──────────────────────────────────────────
         file_ops = _get_file_ops(task_id)
-        result = file_ops.read_file(path, offset, limit)
+        result = file_ops.read_file(str(_resolved), offset, limit)
         result_dict = result.to_dict()
 
         # ── Character-count guard ─────────────────────────────────────
@@ -1888,8 +1882,9 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
             return tool_error(block_error)
 
         file_ops = _get_file_ops(task_id)
+        search_path = str(resolved_path) if resolved_path is not None else path
         result = file_ops.search(
-            pattern=pattern, path=path, target=target, file_glob=file_glob,
+            pattern=pattern, path=search_path, target=target, file_glob=file_glob,
             limit=limit, offset=offset, output_mode=output_mode, context=context
         )
         omitted = _filter_read_blocked_search_results(result, task_id)

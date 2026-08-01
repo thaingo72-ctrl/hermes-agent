@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+import agent.runtime_cwd as runtime_cwd
 import tools.file_tools as ft
 import tools.terminal_tool as terminal_tool
 
@@ -37,7 +38,7 @@ def _isolated_cwd(tmp_path, monkeypatch):
     # the worktree.
     monkeypatch.chdir(decoy)
     # No session cwd recorded yet (fresh-session condition).
-    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+    monkeypatch.setattr(runtime_cwd, "_SESSION_CWD_RECORDS", {})
     return workspace, decoy
 
 
@@ -72,7 +73,7 @@ def test_live_tracking_cwd_wins_over_relative_terminal_cwd(_isolated_cwd, monkey
     """
     workspace, decoy = _isolated_cwd
     monkeypatch.setenv("TERMINAL_CWD", ".")
-    terminal_tool.record_session_cwd("default", str(workspace))
+    runtime_cwd.record_session_cwd("default", str(workspace))
 
     resolved = ft._resolve_path_for_task("target.py", task_id="default")
 
@@ -126,7 +127,7 @@ def test_container_relative_path_keeps_container_cwd_symlink(tmp_path, monkeypat
     container_mount.symlink_to(host_project, target_is_directory=True)
     monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: {"env_type": "docker"})
     monkeypatch.setattr(terminal_tool, "_active_environments", {})
-    terminal_tool.record_session_cwd("default", str(container_mount))
+    runtime_cwd.record_session_cwd("default", str(container_mount))
 
     resolved = ft._resolve_path_for_task("oilsands-sim/README.md", task_id="default")
 
@@ -136,7 +137,6 @@ def test_container_relative_path_keeps_container_cwd_symlink(tmp_path, monkeypat
 
 class _DummyDockerEnvironment:
     cwd = "/workspace"
-    cwd_owner = "default"
 
 
 def test_resolution_base_always_absolute_no_terminal_cwd(_isolated_cwd, monkeypatch):
@@ -159,7 +159,7 @@ def test_warning_fires_when_relative_path_escapes_workspace(_isolated_cwd, monke
     # Live cwd = workspace, but the relative path resolves to decoy (process cwd)
     # because TERMINAL_CWD is the poison '.'.  Simulate by recording workspace
     # as the session cwd while the resolved path is under decoy.
-    terminal_tool.record_session_cwd("default", str(workspace))
+    runtime_cwd.record_session_cwd("default", str(workspace))
     resolved_in_decoy = decoy / "target.py"
 
     warn = ft._path_resolution_warning("target.py", resolved_in_decoy, task_id="default")
@@ -188,7 +188,7 @@ def test_warning_fires_from_terminal_cwd_when_registry_empty(_isolated_cwd, monk
     worktree is flagged on the very first write.
     """
     workspace, decoy = _isolated_cwd
-    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+    monkeypatch.setattr(runtime_cwd, "_SESSION_CWD_RECORDS", {})
     monkeypatch.setenv("TERMINAL_CWD", str(workspace))
 
     # Relative path that escapes the worktree into the decoy/main checkout.
@@ -224,7 +224,7 @@ def _two_worktree_sessions(tmp_path, monkeypatch):
     monkeypatch.chdir(main)
     monkeypatch.delenv("TERMINAL_CWD", raising=False)
     monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
-    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+    monkeypatch.setattr(runtime_cwd, "_SESSION_CWD_RECORDS", {})
     monkeypatch.setattr(ft, "_file_ops_cache", {})
     # Both sessions register their worktree cwd (TUI/desktop registration path;
     # registration seeds each session's record).
@@ -254,3 +254,48 @@ def test_unregistered_session_never_inherits_another_sessions_record(
     assert not str(resolved).startswith(str(wt_a))
     assert not str(resolved).startswith(str(wt_b))
     assert resolved == (main / "target.py").resolve()
+
+
+def test_shell_file_ops_receive_session_resolved_paths(_two_worktree_sessions, monkeypatch):
+    """Shell-backed file tools must not let the shared env cwd resolve paths."""
+    import json
+    from types import SimpleNamespace
+
+    wt_a, wt_b, _main = _two_worktree_sessions
+    calls = []
+
+    class FakeFileOps:
+        def read_file(self, path, offset, limit):
+            calls.append(("read", path))
+            return SimpleNamespace(
+                content="1|ok",
+                error=None,
+                to_dict=lambda: {
+                    "content": "1|ok",
+                    "error": None,
+                    "file_size": 2,
+                    "total_lines": 1,
+                    "truncated": False,
+                },
+            )
+
+        def search(self, pattern, path=".", **kwargs):
+            calls.append(("search", path))
+            return SimpleNamespace(
+                matches=[],
+                to_dict=lambda densify=False: {
+                    "matches": [],
+                    "files": [],
+                    "total_count": 0,
+                },
+            )
+
+    monkeypatch.setattr(ft, "_get_file_ops", lambda task_id="default": FakeFileOps())
+
+    assert json.loads(ft.read_file_tool("target.py", task_id="sess-a"))["error"] is None
+    assert json.loads(ft.search_tool("wt_b", path=".", task_id="sess-b"))["total_count"] == 0
+
+    assert calls == [
+        ("read", str((wt_a / "target.py").resolve())),
+        ("search", str(wt_b.resolve())),
+    ]

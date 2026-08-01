@@ -3,6 +3,7 @@
 import json
 from types import SimpleNamespace
 
+import agent.runtime_cwd as runtime_cwd
 import tools.terminal_tool as terminal_tool
 
 
@@ -98,7 +99,7 @@ def test_background_command_prefers_recorded_session_cwd_over_init_time_cwd(monk
     task_id = "session-live-cwd-bg"
     monkeypatch.setattr(terminal_tool, "_active_environments", {task_id: FakeEnv()})
     monkeypatch.setattr(terminal_tool, "_last_activity", {})
-    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+    monkeypatch.setattr(runtime_cwd, "_SESSION_CWD_RECORDS", {})
     monkeypatch.setattr(terminal_tool, "_task_env_overrides", {task_id: {"cwd": "/workspace/init"}})
     monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: _minimal_terminal_config(cwd="/workspace/init"))
     monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
@@ -109,7 +110,7 @@ def test_background_command_prefers_recorded_session_cwd_over_init_time_cwd(monk
         lambda command, env_type, **kwargs: {"approved": True},
     )
     monkeypatch.setattr(process_registry_mod, "process_registry", registry)
-    terminal_tool.record_session_cwd(task_id, "/workspace/live")
+    runtime_cwd.record_session_cwd(task_id, "/workspace/live")
 
     result = json.loads(
         terminal_tool.terminal_tool(
