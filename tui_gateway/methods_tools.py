@@ -332,6 +332,7 @@ def _(rid, params: dict) -> dict:
         skills: dict[str, dict] = {}
         try:
             from agent.skill_commands import scan_skill_commands
+            from tui_gateway.methods_complete import _skill_usage_lookup
 
             # Usage + origin per skill command. Surfaces here rather than in a
             # second RPC because every consumer that renders the catalog also

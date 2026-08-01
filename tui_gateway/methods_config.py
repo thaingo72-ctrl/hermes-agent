@@ -186,7 +186,10 @@ def _(rid, params: dict) -> dict:
     if key == "project":
         cfg_terminal = _load_cfg().get("terminal") or {}
         raw = str(params.get("cwd", "") or cfg_terminal.get("cwd", "") or "").strip()
-        cwd = _completion_cwd({"cwd": raw} if raw else {})
+        cwd = _methods_complete._completion_cwd(
+            {"cwd": raw} if raw else {},
+            _completion_services(),
+        )
         return _ok(rid, {"cwd": cwd, "branch": _git_branch_for_cwd(cwd)})
     if key == "full":
         return _ok(rid, {"config": _load_cfg()})

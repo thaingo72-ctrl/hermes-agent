@@ -3,8 +3,7 @@
 Reported during the TUI v2 blitz retest:
   - typing `@folder:` (and `@folder` with no colon yet) surfaced files
     alongside directories — the gateway-side completion lives in
-    `tui_gateway/server.py` and was never touched by the earlier fix to
-    `hermes_cli/commands.py`.
+    `tui_gateway/methods_complete.py`.
   - typing `@appChrome` required the full `@ui-tui/src/components/app…`
     path to find the file — users expect Cmd-P-style fuzzy basename
     matching across the repo, not a strict directory prefix filter.
@@ -23,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from tui_gateway import server
+from tui_gateway import methods_complete, server
 
 
 def _fixture(tmp_path: Path):
@@ -43,17 +42,13 @@ def _items(word: str):
 def _reset_fuzzy_cache(monkeypatch):
     # Each test walks a fresh tmp dir; clear the cached listing so prior
     # roots can't leak through the TTL window.
-    server._fuzzy_cache.clear()
-    # #70041: _launch_configured_cwd() reads the launch profile's config.yaml
-    # via _load_cfg(), which resolves through _hermes_home captured at module
-    # import time — before the per-test HERMES_HOME redirect applies. When the
-    # developer's real config sets terminal.cwd, _completion_cwd() returns that
-    # directory instead of the test's tmp_path (from monkeypatch.chdir). Patch
-    # it to None so _completion_cwd falls through to os.getcwd(), which
-    # monkeypatch.chdir controls.
-    monkeypatch.setattr(server, "_launch_configured_cwd", lambda: None)
+    methods_complete._fuzzy_cache.clear()
+    # #70041: completion cwd reads the launch profile config by default. Patch
+    # the completion-owned helper so hermetic tests fall through to os.getcwd(),
+    # which monkeypatch.chdir controls.
+    monkeypatch.setattr(methods_complete, "_launch_configured_cwd", lambda _services: None)
     yield
-    server._fuzzy_cache.clear()
+    methods_complete._fuzzy_cache.clear()
 
 
 def test_at_folder_colon_only_dirs(tmp_path, monkeypatch):
@@ -163,12 +158,12 @@ def test_fuzzy_paths_relative_to_cwd_inside_subdir(tmp_path, monkeypatch):
     assert "@file:src/appChrome.tsx" in texts, texts
     assert not any("apps/web/" in t for t in texts), texts
 
-    server._fuzzy_cache.clear()
+    methods_complete._fuzzy_cache.clear()
     other_texts = [t for t, _, _ in _items("@server")]
 
     assert not any("server.ts" in t for t in other_texts), other_texts
 
-    server._fuzzy_cache.clear()
+    methods_complete._fuzzy_cache.clear()
     readme_texts = [t for t, _, _ in _items("@README")]
 
     assert not any("README.md" in t for t in readme_texts), readme_texts
@@ -186,7 +181,7 @@ def test_fuzzy_finds_top_level_entries_outside_a_git_repo(tmp_path, monkeypatch)
     root listdir seed guarantees immediate children are always candidates.
     """
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(server, "_FUZZY_CACHE_MAX_FILES", 5)
+    monkeypatch.setattr(methods_complete, "_FUZZY_CACHE_MAX_FILES", 5)
 
     # A deep subtree that soaks up the entire (patched) file budget...
     deep = tmp_path / "aaa_hog"
@@ -214,9 +209,9 @@ def test_leading_slash_matches_the_bare_form(tmp_path, monkeypatch):
     (tmp_path / "Desktop").mkdir()
     (tmp_path / "Desktop" / "note.txt").write_text("x")
 
-    server._fuzzy_cache.clear()
+    methods_complete._fuzzy_cache.clear()
     bare = [t for t, _, _ in _items("@Desktop")]
-    server._fuzzy_cache.clear()
+    methods_complete._fuzzy_cache.clear()
     slashed = [t for t, _, _ in _items("@/Desktop")]
 
     assert "@folder:Desktop/" in bare
@@ -256,10 +251,8 @@ def test_completion_ignores_real_terminal_cwd(tmp_path, monkeypatch):
 
     # _completion_cwd should resolve to tmp_path (via os.getcwd),
     # not to any configured terminal.cwd from the real config.
-    resolved = server._completion_cwd({})
+    resolved = methods_complete._completion_cwd({})
     assert resolved == str(tmp_path), (
         f"_completion_cwd resolved to {resolved} instead of {tmp_path} — "
         f"the autouse fixture may not be patching _launch_configured_cwd"
     )
-
-

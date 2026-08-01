@@ -31,7 +31,7 @@ def _(rid, params: dict) -> dict:
         explicit_cwd = bool(raw_cwd) and os.path.isdir(os.path.abspath(os.path.expanduser(raw_cwd)))
     except Exception:
         explicit_cwd = False
-    resolved_cwd = _completion_cwd(params)
+    resolved_cwd = _methods_complete._completion_cwd(params, _completion_services())
     source = _resolve_session_source(str(params.get("source") or "").strip() or None)
     _enable_gateway_prompts()
 
