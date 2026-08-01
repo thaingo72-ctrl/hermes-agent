@@ -407,237 +407,25 @@ def _parse_service_tier_config(raw: str) -> str | None:
 
 def load_cli_config() -> Dict[str, Any]:
     """
-    Load CLI configuration from config files.
-    
-    Config lookup order:
-    1. ~/.hermes/config.yaml (user config - preferred)
-    2. ./cli-config.yaml (project config - fallback)
-    
-    Environment variables take precedence over config file values.
-    Returns default values if no config file exists.
+    Load CLI configuration from the canonical typed config loader.
 
-    If HERMES_IGNORE_USER_CONFIG=1 is set (via ``hermes chat --ignore-user-config``),
-    the user config at ``~/.hermes/config.yaml`` is skipped entirely and only the
-    built-in defaults plus the project-level ``cli-config.yaml`` (if any) are used.
-    Credentials in ``.env`` are still loaded — this flag only suppresses
-    behavioral/config settings.
+    ``hermes_cli.config`` owns config.yaml/default/managed-overlay/env-ref
+    expansion.  This function is now only the CLI surface bridge: resolve the
+    local launch cwd and export runtime env carriers for tools that still read
+    process environment.
     """
-    # Check user config first ({HERMES_HOME}/config.yaml)
-    user_config_path = _hermes_home / 'config.yaml'
-    project_config_path = Path(__file__).parent / 'cli-config.yaml'
+    from hermes_cli.config import load_config, read_raw_config
 
-    # --ignore-user-config: force-skip the user config.yaml (still honor project
-    # config as a fallback so defaults stay sensible).
-    ignore_user_config = os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1"
-
-    # Use user config if it exists, otherwise project config
-    if user_config_path.exists() and not ignore_user_config:
-        config_path = user_config_path
-    else:
-        config_path = project_config_path
-
-    # Default configuration
-    defaults = {
-        "model": {
-            "default": "",
-            "base_url": "",
-            "provider": "auto",
-        },
-        "terminal": {
-            "env_type": "local",
-            "cwd": ".",  # "." is resolved to os.getcwd() at runtime
-            "home_mode": "auto",
-            "lifetime_seconds": 300,
-            "docker_image": "nikolaik/python-nodejs:python3.11-nodejs20",
-            "docker_forward_env": [],
-            "singularity_image": "docker://nikolaik/python-nodejs:python3.11-nodejs20",
-            "modal_image": "nikolaik/python-nodejs:python3.11-nodejs20",
-            "daytona_image": "nikolaik/python-nodejs:python3.11-nodejs20",
-            "docker_volumes": [],  # host:container volume mounts for Docker backend
-            "docker_mount_cwd_to_workspace": False,  # explicit opt-in only; default off for sandbox isolation
-        },
-        "browser": {
-            "inactivity_timeout": 120,  # Auto-cleanup inactive browser sessions after 2 min
-            "record_sessions": False,  # Auto-record browser sessions as WebM videos
-            "engine": "auto",  # Browser engine: auto (Chrome), lightpanda, chrome
-            "camofox": {
-                "rewrite_loopback_urls": False,
-                "loopback_host_alias": "host.docker.internal",
-            },
-        },
-        "compression": {
-            "enabled": True,      # Auto-compress when approaching context limit
-            "threshold": 0.50,    # Compress at 50% of model's context limit
-            "min_tail_user_messages": 1,  # Real user messages guaranteed in the tail (1 = existing single anchor)
-        },
-        "agent": {
-            "max_turns": 500,  # Default max tool-calling iterations (shared with subagents)
-            "verbose": False,
-            "system_prompt": "",
-            "prefill_messages_file": "",
-            "reasoning_effort": "",
-            "service_tier": "",
-            "personalities": {
-                "helpful": "You are a helpful, friendly AI assistant.",
-                "concise": "You are a concise assistant. Keep responses brief and to the point.",
-                "technical": "You are a technical expert. Provide detailed, accurate technical information.",
-                "creative": "You are a creative assistant. Think outside the box and offer innovative solutions.",
-                "teacher": "You are a patient teacher. Explain concepts clearly with examples.",
-                "kawaii": "You are a kawaii assistant! Use cute expressions like (◕‿◕), ★, ♪, and ~! Add sparkles and be super enthusiastic about everything! Every response should feel warm and adorable desu~! ヽ(>∀<☆)ノ",
-                "catgirl": "You are Neko-chan, an anime catgirl AI assistant, nya~! Add 'nya' and cat-like expressions to your speech. Use kaomoji like (=^･ω･^=) and ฅ^•ﻌ•^ฅ. Be playful and curious like a cat, nya~!",
-                "pirate": "Arrr! Ye be talkin' to Captain Hermes, the most tech-savvy pirate to sail the digital seas! Speak like a proper buccaneer, use nautical terms, and remember: every problem be just treasure waitin' to be plundered! Yo ho ho!",
-                "shakespeare": "Hark! Thou speakest with an assistant most versed in the bardic arts. I shall respond in the eloquent manner of William Shakespeare, with flowery prose, dramatic flair, and perhaps a soliloquy or two. What light through yonder terminal breaks?",
-                "surfer": "Duuude! You're chatting with the chillest AI on the web, bro! Everything's gonna be totally rad. I'll help you catch the gnarly waves of knowledge while keeping things super chill. Cowabunga!",
-                "noir": "The rain hammered against the terminal like regrets on a guilty conscience. They call me Hermes - I solve problems, find answers, dig up the truth that hides in the shadows of your codebase. In this city of silicon and secrets, everyone's got something to hide. What's your story, pal?",
-                "uwu": "hewwo! i'm your fwiendwy assistant uwu~ i wiww twy my best to hewp you! *nuzzles your code* OwO what's this? wet me take a wook! i pwomise to be vewy hewpful >w<",
-                "philosopher": "Greetings, seeker of wisdom. I am an assistant who contemplates the deeper meaning behind every query. Let us examine not just the 'how' but the 'why' of your questions. Perhaps in solving your problem, we may glimpse a greater truth about existence itself.",
-                "hype": "YOOO LET'S GOOOO!!! I am SO PUMPED to help you today! Every question is AMAZING and we're gonna CRUSH IT together! This is gonna be LEGENDARY! ARE YOU READY?! LET'S DO THIS!",
-            },
-        },
-
-        "display": {
-            "compact": False,
-            "resume_display": "full",
-            # Recap tuning for /resume — see hermes_cli/config.py DEFAULT_CONFIG.
-            "resume_exchanges": 10,
-            "resume_max_user_chars": 300,
-            "resume_max_assistant_chars": 200,
-            "resume_max_assistant_lines": 3,
-            "resume_skip_tool_only": True,
-            # Live reasoning display default ON — keep in sync with
-            # hermes_cli/config.py DEFAULT_CONFIG (display.show_reasoning).
-            "show_reasoning": True,
-            "reasoning_full": False,
-            "streaming": True,
-            "busy_input_mode": "interrupt",
-            "persistent_output": True,
-            "persistent_output_max_lines": 200,
-            # Print a one-line summary of resolved modal prompts (approval /
-            # clarify) into scrollback so the decision survives the repaint.
-            "persist_prompts": True,
-
-            "skin": "default",
-        },
-        "clarify": {
-            "timeout": 120,  # Seconds to wait for a clarify answer before auto-proceeding
-        },
-        "code_execution": {
-            "timeout": 300,    # Max seconds a sandbox script can run before being killed (5 min)
-            "max_tool_calls": 50,  # Max RPC tool calls per execution
-        },
-        "auxiliary": {
-            "vision": {
-                "provider": "auto",
-                "model": "",
-                "base_url": "",
-                "api_key": "",
-            },
-            "web_extract": {
-                "provider": "auto",
-                "model": "",
-                "base_url": "",
-                "api_key": "",
-            },
-        },
-        "delegation": {
-            "max_iterations": 45,  # Max tool-calling turns per child agent
-            "model": "",       # Subagent model override (empty = inherit parent model)
-            "provider": "",    # Subagent provider override (empty = inherit parent provider)
-            "base_url": "",    # Direct OpenAI-compatible endpoint for subagents
-            "api_key": "",     # API key for delegation.base_url (falls back to OPENAI_API_KEY)
-        },
-        "onboarding": {
-            # First-touch hint flags (see agent/onboarding.py).  Each hint is
-            # shown once per install then latched here.
-            "seen": {},
-        },
-    }
-    
-    # Track whether the config file explicitly set terminal config.
-    # When using defaults (no config file / no terminal section), we should NOT
-    # overwrite env vars that were already set by .env -- only a user's config
-    # file should be authoritative.
-    _file_has_terminal_config = False
-
-    # Load from file if exists
-    if config_path.exists():
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                from hermes_cli.config import _normalize_root_model_keys
-
-                file_config = _normalize_root_model_keys(fast_safe_load(f) or {})
-            
-            _file_has_terminal_config = "terminal" in file_config
-
-            # Handle model config - can be string (new format) or dict (old format)
-            if "model" in file_config:
-                if isinstance(file_config["model"], str):
-                    # New format: model is just a string, convert to dict structure
-                    defaults["model"]["default"] = file_config["model"]
-                elif isinstance(file_config["model"], dict):
-                    # Old format: model is a dict with default/base_url
-                    defaults["model"].update(file_config["model"])
-                    # If the user config sets model.model but not model.default,
-                    # promote model.model to model.default so the user's explicit
-                    # choice isn't shadowed by the hardcoded default.  Without this,
-                    # profile configs that only set "model:" (not "default:") silently
-                    # fall back to claude-opus because the merge preserves the
-                    # hardcoded default and HermesCLI.__init__ checks "default" first.
-                    if "model" in file_config["model"] and "default" not in file_config["model"]:
-                        defaults["model"]["default"] = file_config["model"]["model"]
-
-            # Deep merge file_config into defaults.
-            # First: merge keys that exist in both (deep-merge dicts, overwrite scalars)
-            for key in defaults:
-                if key == "model":
-                    continue  # Already handled above
-                if key in file_config:
-                    if isinstance(defaults[key], dict) and file_config[key] is None:
-                        continue
-                    if isinstance(defaults[key], dict) and isinstance(file_config[key], dict):
-                        defaults[key].update(file_config[key])
-                    else:
-                        defaults[key] = file_config[key]
-            
-            # Second: carry over keys from file_config that aren't in defaults
-            # (e.g. platform_toolsets, provider_routing, memory, honcho, etc.)
-            for key in file_config:
-                if key not in defaults and key != "model":
-                    defaults[key] = file_config[key]
-            
-            # Handle legacy root-level max_turns (backwards compat) - copy to
-            # agent.max_turns whenever the nested key is missing.
-            agent_file_config = file_config.get("agent")
-            if "max_turns" in file_config and not (
-                isinstance(agent_file_config, dict)
-                and agent_file_config.get("max_turns") is not None
-            ):
-                defaults["agent"]["max_turns"] = file_config["max_turns"]
-        except Exception as e:
-            logger.warning("Failed to load cli-config.yaml: %s", e)
-
-    # Expand ${ENV_VAR} references in config values before bridging to env vars.
-    from hermes_cli.config import _expand_env_vars
-    defaults = _expand_env_vars(defaults)
-
-    # Managed scope: overlay administrator-pinned values LAST so they win over
-    # the user's config here too. cli.py builds its config independently of
-    # hermes_cli.config._load_config_impl (which has its own managed merge), so
-    # without this the entire interactive CLI/TUI surface — skin, display prefs,
-    # etc. read from CLI_CONFIG — would silently ignore managed scope while
-    # `hermes config`/`doctor`/guards (which use load_config) honor it. The
-    # shared helper mirrors _load_config_impl (env-only expansion, root-model
-    # normalization, leaf-merge) and is fail-open.
-    from hermes_cli import managed_scope
-
-    defaults = managed_scope.apply_managed_overlay(defaults)
+    defaults = load_config()
+    raw_config = read_raw_config()
+    _file_has_terminal_config = isinstance(raw_config.get("terminal"), dict)
 
     # Apply terminal config to environment variables (so terminal_tool picks them up)
     terminal_config = defaults.get("terminal", {})
     
-    # Normalize config key: the new config system (hermes_cli/config.py) and all
-    # documentation use "backend", the legacy cli-config.yaml uses "env_type".
-    # Accept both, with "backend" taking precedence (it's the documented key).
+    # The canonical config key is ``terminal.backend``.  ``terminal_tool``
+    # consumes the runtime carrier under its internal ``env_type`` name, so
+    # derive that carrier here without accepting a second config key.
     if "backend" in terminal_config:
         terminal_config["env_type"] = terminal_config["backend"]
     

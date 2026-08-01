@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Set
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.secret_prompt import masked_secret_prompt
 
@@ -933,6 +935,141 @@ def _ensure_hermes_home_managed(home: Path):
 # =============================================================================
 
 from hermes_cli.config_defaults import DEFAULT_CONFIG, OPTIONAL_ENV_VARS  # noqa: F401
+
+
+class _HermesSectionModel(BaseModel):
+    """Base for typed config sections that must preserve extension keys."""
+
+    model_config = ConfigDict(extra="allow", strict=True)
+
+
+class HermesModelConfig(_HermesSectionModel):
+    default: str = ""
+    provider: str = "auto"
+    base_url: str = ""
+    api_key: str = ""
+    api_mode: str = ""
+    context_length: Optional[int] = None
+    aliases: Dict[str, Any] = Field(default_factory=dict)
+
+
+class HermesAgentConfig(_HermesSectionModel):
+    max_turns: int = 500
+    gateway_timeout: int = 1800
+    restart_drain_timeout: int = 0
+    build_wait_timeout: int = 600
+    api_max_retries: int = 3
+    service_tier: str = ""
+    system_prompt: str = ""
+    prefill_messages_file: str = ""
+    reasoning_effort: str = ""
+    disabled_toolsets: List[str] = Field(default_factory=list)
+    personalities: Dict[str, Any] = Field(default_factory=dict)
+    reasoning_overrides: Dict[str, Any] = Field(default_factory=dict)
+
+
+class HermesTerminalConfig(_HermesSectionModel):
+    backend: str = "local"
+    modal_mode: str = "auto"
+    cwd: str = "."
+    timeout: int = 180
+    daemon_term_grace_seconds: float = 2.0
+    env_passthrough: List[str] = Field(default_factory=list)
+    home_mode: str = "auto"
+    shell_init_files: List[str] = Field(default_factory=list)
+    auto_source_bashrc: bool = True
+    docker_image: str = "nikolaik/python-nodejs:python3.11-nodejs20"
+    docker_forward_env: List[str] = Field(default_factory=list)
+    docker_env: Dict[str, Any] = Field(default_factory=dict)
+    singularity_image: str = "docker://nikolaik/python-nodejs:python3.11-nodejs20"
+    modal_image: str = "nikolaik/python-nodejs:python3.11-nodejs20"
+    daytona_image: str = "nikolaik/python-nodejs:python3.11-nodejs20"
+    vercel_runtime: str = "node24"
+    container_cpu: int = 1
+    container_memory: int = 5120
+    container_disk: int = 51200
+    container_persistent: bool = True
+    docker_volumes: List[str] = Field(default_factory=list)
+    docker_mount_cwd_to_workspace: bool = False
+    docker_network: bool = True
+    docker_extra_args: List[str] = Field(default_factory=list)
+    docker_run_as_host_user: bool = False
+    persistent_shell: bool = True
+
+
+class HermesAuxiliaryTaskConfig(_HermesSectionModel):
+    provider: str = "auto"
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+
+
+class HermesAuxiliaryConfig(_HermesSectionModel):
+    vision: HermesAuxiliaryTaskConfig = Field(default_factory=HermesAuxiliaryTaskConfig)
+    web_extract: HermesAuxiliaryTaskConfig = Field(default_factory=HermesAuxiliaryTaskConfig)
+    approval: HermesAuxiliaryTaskConfig = Field(default_factory=HermesAuxiliaryTaskConfig)
+
+
+class HermesDelegationConfig(_HermesSectionModel):
+    max_iterations: int = 45
+    model: str = ""
+    provider: str = ""
+    base_url: str = ""
+    api_key: str = ""
+
+
+class HermesGatewayScaleToZeroConfig(_HermesSectionModel):
+    idle_timeout_minutes: int = 5
+
+
+class HermesGatewayRestartLoopGuardConfig(_HermesSectionModel):
+    max_restarts: int = 3
+    window_seconds: int = 60
+
+
+class HermesGatewayRespawnStormConfig(_HermesSectionModel):
+    max_starts: int = 5
+    window_seconds: int = 120
+
+
+class HermesGatewayConfigSection(_HermesSectionModel):
+    delivery_ledger: bool = True
+    platform_connect_timeout: int = 30
+    loop_watchdog: bool = True
+    write_sessions_json: bool = True
+    multiplex_profiles: bool = False
+    max_concurrent_sessions: Optional[int] = None
+    platforms: Dict[str, Any] = Field(default_factory=dict)
+    streaming: Dict[str, Any] = Field(default_factory=dict)
+    scale_to_zero: HermesGatewayScaleToZeroConfig = Field(
+        default_factory=HermesGatewayScaleToZeroConfig
+    )
+    restart_loop_guard: HermesGatewayRestartLoopGuardConfig = Field(
+        default_factory=HermesGatewayRestartLoopGuardConfig
+    )
+    respawn_storm: HermesGatewayRespawnStormConfig = Field(
+        default_factory=HermesGatewayRespawnStormConfig
+    )
+
+
+class HermesConfig(_HermesSectionModel):
+    model: str | HermesModelConfig = ""
+    agent: HermesAgentConfig = Field(default_factory=HermesAgentConfig)
+    terminal: HermesTerminalConfig = Field(default_factory=HermesTerminalConfig)
+    gateway: HermesGatewayConfigSection = Field(default_factory=HermesGatewayConfigSection)
+    auxiliary: HermesAuxiliaryConfig = Field(default_factory=HermesAuxiliaryConfig)
+    delegation: HermesDelegationConfig = Field(default_factory=HermesDelegationConfig)
+
+    def to_compat_dict(self) -> Dict[str, Any]:
+        """Compatibility view for existing dict-based call sites."""
+
+        return self.model_dump(mode="python")
+
+
+def validate_typed_config(config: Dict[str, Any]) -> HermesConfig:
+    """Validate the canonical Hermes config dict through the typed schema."""
+
+    return HermesConfig.model_validate(config)
 
 # =============================================================================
 # Config Migration System
@@ -3377,6 +3514,8 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         if managed_config:
             managed_expanded = _expand_env_vars(managed_config)
             expanded = _deep_merge(expanded, managed_expanded)
+        typed_config = validate_typed_config(expanded)
+        expanded = typed_config.to_compat_dict()
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_sig is not None:
             # Cache stores a separate deepcopy so subsequent ``load_config()``

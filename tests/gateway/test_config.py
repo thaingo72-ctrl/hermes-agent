@@ -321,7 +321,7 @@ class TestLoadGatewayConfig:
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "session_reset:\n  mode: idle\n  idle_minutes: 30\n",
+            "gateway:\n  session_reset:\n    mode: idle\n    idle_minutes: 30\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -332,23 +332,27 @@ class TestLoadGatewayConfig:
         assert config.default_reset_policy.idle_minutes == 30
 
 
-    def test_slack_ignored_channels_config_sets_env_bridge(self, tmp_path, monkeypatch):
+    def test_slack_extra_config_is_preserved(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "slack:\n"
-            "  ignored_channels:\n"
-            "    - C0123456789\n"
-            "    - C0987654321\n",
+            "platforms:\n"
+            "  slack:\n"
+            "    extra:\n"
+            "      ignored_channels:\n"
+            "        - C0123456789\n"
+            "        - C0987654321\n",
             encoding="utf-8",
         )
 
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-        monkeypatch.delenv("SLACK_IGNORED_CHANNELS", raising=False)
 
-        load_gateway_config()
+        config = load_gateway_config()
 
-        assert os.getenv("SLACK_IGNORED_CHANNELS") == "C0123456789,C0987654321"
+        assert config.platforms[Platform.SLACK].extra["ignored_channels"] == [
+            "C0123456789",
+            "C0987654321",
+        ]
 
 
     def test_typing_status_text_from_nested_platforms_block(self, tmp_path, monkeypatch):
@@ -623,15 +627,12 @@ class TestLoadGatewayConfig:
         assert config.unauthorized_dm_behavior == "ignore"
 
 
-    def test_present_empty_top_level_session_reset_blocks_nested_fallback(self, tmp_path, monkeypatch):
-        """Key-presence precedence: a present (even empty) top-level
-        session_reset must NOT be replaced by gateway.session_reset —
-        the fallback fires only when the top-level key is absent."""
+    def test_canonical_gateway_session_reset_is_honored(self, tmp_path, monkeypatch):
+        """Gateway-owned reset policy lives under gateway.session_reset."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
-            "session_reset: {}\n"
             "gateway:\n"
             "  session_reset:\n"
             "    mode: idle\n"
@@ -642,8 +643,8 @@ class TestLoadGatewayConfig:
 
         config = load_gateway_config()
 
-        # The nested value must not leak through the present top-level key.
-        assert config.default_reset_policy.mode != "idle"
+        assert config.default_reset_policy.mode == "idle"
+        assert config.default_reset_policy.idle_minutes == 30
 
 
     def test_relay_platform_enabled_from_env_url(self, tmp_path, monkeypatch):
@@ -794,9 +795,11 @@ class TestLoadGatewayConfig:
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text(
-            "unauthorized_dm_behavior: ignore\n"
-            "whatsapp:\n"
-            "  unauthorized_dm_behavior: pair\n",
+            "gateway:\n"
+            "  unauthorized_dm_behavior: ignore\n"
+            "platforms:\n"
+            "  whatsapp:\n"
+            "    unauthorized_dm_behavior: pair\n",
             encoding="utf-8",
         )
 
@@ -855,7 +858,7 @@ class TestLoadGatewayConfig:
         default_home.mkdir()
         default_config = default_home / "config.yaml"
         default_config.write_text(
-            "multiplex_profiles: true\n",
+            "gateway:\n  multiplex_profiles: true\n",
             encoding="utf-8",
         )
 
@@ -863,7 +866,7 @@ class TestLoadGatewayConfig:
         secondary_home.mkdir()
         secondary_config = secondary_home / "config.yaml"
         secondary_config.write_text(
-            "multiplex_profiles: true\n",
+            "gateway:\n  multiplex_profiles: true\n",
             encoding="utf-8",
         )
 
@@ -888,7 +891,8 @@ class TestLoadGatewayConfig:
 
         assert config.multiplex_profiles is True
         assert config.platforms[Platform.DISCORD].token == "worker-token"
-        assert Platform.API_SERVER not in config.platforms
+        assert config.platforms[Platform.API_SERVER].enabled is False
+        assert "key" not in config.platforms[Platform.API_SERVER].extra
 
 
 class TestWebhookPortBridging:
@@ -1072,7 +1076,7 @@ class TestMultiplexProfilesEnvOverride:
         # THE discriminating test: env-set wins over an explicit config value.
         monkeypatch.setenv("GATEWAY_MULTIPLEX_PROFILES", "1")
         config = self._load(
-            tmp_path, monkeypatch, config_text="multiplex_profiles: false\n"
+            tmp_path, monkeypatch, config_text="gateway:\n  multiplex_profiles: false\n"
         )
         assert config.multiplex_profiles is True
 
@@ -1081,7 +1085,7 @@ class TestMultiplexProfilesEnvOverride:
     def test_config_true_when_env_unset(self, tmp_path, monkeypatch):
         monkeypatch.delenv("GATEWAY_MULTIPLEX_PROFILES", raising=False)
         config = self._load(
-            tmp_path, monkeypatch, config_text="multiplex_profiles: true\n"
+            tmp_path, monkeypatch, config_text="gateway:\n  multiplex_profiles: true\n"
         )
         assert config.multiplex_profiles is True
 
@@ -1091,7 +1095,7 @@ class TestMultiplexProfilesEnvOverride:
         # turn OFF a config.yaml opt-in.
         monkeypatch.setenv("GATEWAY_MULTIPLEX_PROFILES", "")
         config = self._load(
-            tmp_path, monkeypatch, config_text="multiplex_profiles: true\n"
+            tmp_path, monkeypatch, config_text="gateway:\n  multiplex_profiles: true\n"
         )
         assert config.multiplex_profiles is True
 
@@ -1127,19 +1131,15 @@ class TestMultiplexProfilesConfig:
         )
 
 
-    def test_multiplex_profiles_explicit_top_level_false_not_consulting_nested(
+    def test_multiplex_profiles_root_alias_is_ignored(
         self, tmp_path, monkeypatch
     ):
-        """Lock in the `is None` vs `is False` distinction: when top-level is
-        explicitly false, the loader must forward False WITHOUT consulting the
-        nested form (so a stale `gateway.multiplex_profiles: true` cannot
-        silently re-enable multiplexing). Guards against a future regression
-        that flips the check to `not _mp`."""
+        """Obsolete root-level multiplex_profiles no longer overrides gateway.*."""
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "multiplex_profiles: false\n"
-            "gateway:\n  multiplex_profiles: true\n",
+            "multiplex_profiles: true\n"
+            "gateway:\n  multiplex_profiles: false\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -1147,8 +1147,8 @@ class TestMultiplexProfilesConfig:
         config = load_gateway_config()
 
         assert config.multiplex_profiles is False, (
-            "Explicit top-level false was overridden by nested true — "
-            "loader must respect top-level precedence when key is present"
+            "Root-level multiplex_profiles should be ignored in favor of "
+            "gateway.multiplex_profiles"
         )
 
 
