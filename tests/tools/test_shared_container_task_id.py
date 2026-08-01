@@ -17,6 +17,7 @@ Docker Backend in ``website/docs/user-guide/configuration.md``.
 
 import pytest
 
+from agent import runtime_cwd
 from tools import terminal_tool
 
 
@@ -25,9 +26,13 @@ def _clean_overrides():
     """Ensure no stray overrides from other tests leak in."""
     before = dict(terminal_tool._task_env_overrides)
     terminal_tool._task_env_overrides.clear()
+    runtime_cwd.clear_session_cwd("acp-session-abc")
+    runtime_cwd.clear_session_cwd("bench-env")
     yield
     terminal_tool._task_env_overrides.clear()
     terminal_tool._task_env_overrides.update(before)
+    runtime_cwd.clear_session_cwd("acp-session-abc")
+    runtime_cwd.clear_session_cwd("bench-env")
 
 
 def test_none_task_id_maps_to_default():
@@ -51,6 +56,7 @@ def test_cwd_only_override_collapses_to_default():
             terminal_tool._resolve_container_task_id("acp-session-abc")
             == "default"
         )
+        assert runtime_cwd.get_session_cwd("acp-session-abc") == "/home/user/project"
     finally:
         terminal_tool.clear_task_env_overrides("acp-session-abc")
 
@@ -65,5 +71,6 @@ def test_env_type_override_keeps_own_id():
             terminal_tool._resolve_container_task_id("bench-env")
             == "bench-env"
         )
+        assert runtime_cwd.get_session_cwd("bench-env") == "/work"
     finally:
         terminal_tool.clear_task_env_overrides("bench-env")

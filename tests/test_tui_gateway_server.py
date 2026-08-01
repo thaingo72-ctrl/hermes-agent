@@ -10583,6 +10583,9 @@ def test_session_delete_success_returns_deleted_id(monkeypatch):
             return True
 
     monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    from agent import runtime_cwd
+
+    runtime_cwd.record_session_cwd("old-1", "/logical/retained")
 
     resp = server.handle_request(
         {"id": "1", "method": "session.delete", "params": {"session_id": "old-1"}}
@@ -10591,6 +10594,7 @@ def test_session_delete_success_returns_deleted_id(monkeypatch):
     assert "result" in resp, resp
     assert resp["result"] == {"deleted": "old-1"}
     assert captured["sid"] == "old-1"
+    assert runtime_cwd.get_session_cwd("old-1") is None
     # sessions_dir must be forwarded so transcript files get cleaned up
     # too — not just the SQLite row.  The autouse _isolate_hermes_home
     # fixture pins HERMES_HOME to a temp dir; the handler should append

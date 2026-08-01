@@ -120,8 +120,9 @@ def _register_task_cwd(task_id: str, cwd: str) -> None:
     if not task_id:
         return
     try:
-        from tools.terminal_tool import register_task_env_overrides
-        register_task_env_overrides(task_id, {"cwd": _translate_acp_cwd(cwd)})
+        from agent.runtime_cwd import record_session_cwd
+
+        record_session_cwd(task_id, _translate_acp_cwd(cwd))
     except Exception:
         logger.debug("Failed to register ACP task cwd override", exc_info=True)
 
@@ -159,8 +160,8 @@ def _cleanup_task_environment(task_id: str) -> None:
     if not task_id:
         return
     try:
-        from tools.terminal_tool import cleanup_vm
-        cleanup_vm(task_id)
+        from tools.terminal_tool import cleanup_task_environment
+        cleanup_task_environment(task_id)
     except Exception:
         logger.debug("Failed to cleanup ACP task environment", exc_info=True)
 

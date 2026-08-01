@@ -1048,11 +1048,11 @@ class BaseEnvironment(ABC):
     # CWD extraction
     # ------------------------------------------------------------------
 
-    def _update_cwd(self, result: dict):
-        """Extract CWD from command output. Override for local file-based read."""
-        self._extract_cwd_from_output(result)
+    def _update_cwd(self, result: dict) -> str | None:
+        """Extract this call's final CWD from command output/result markers."""
+        return self._extract_cwd_from_output(result)
 
-    def _extract_cwd_from_output(self, result: dict):
+    def _extract_cwd_from_output(self, result: dict) -> str | None:
         """Parse the __HERMES_CWD_{session}__ marker from stdout output.
 
         Updates self.cwd and strips the marker from result["output"].
@@ -1062,17 +1062,19 @@ class BaseEnvironment(ABC):
         marker = self._cwd_marker
         last = output.rfind(marker)
         if last == -1:
-            return
+            return None
 
         # Find the opening marker before this closing one
         search_start = max(0, last - 4096)  # CWD path won't be >4KB
         first = output.rfind(marker, search_start, last)
         if first == -1 or first == last:
-            return
+            return None
 
         cwd_path = output[first + len(marker) : last].strip()
         if cwd_path:
             self.cwd = cwd_path
+        else:
+            cwd_path = None
 
         # Strip the marker line AND the \n we injected before it.
         # The wrapper emits: printf '\n__MARKER__%s__MARKER__\n'
@@ -1085,6 +1087,7 @@ class BaseEnvironment(ABC):
         line_end = line_end + 1 if line_end != -1 else len(output)
 
         result["output"] = output[:line_start] + output[line_end:]
+        return cwd_path
 
     # ------------------------------------------------------------------
     # Hooks
@@ -1113,6 +1116,7 @@ class BaseEnvironment(ABC):
         stdin_data: str | None = None,
         rewrite_compound_background: bool = True,
         bounded_capture: bool = False,
+        include_final_cwd: bool = False,
     ) -> dict:
         """Execute a command, return {"output": str, "returncode": int}.
 
@@ -1162,8 +1166,9 @@ class BaseEnvironment(ABC):
         result = self._wait_for_process(
             proc, timeout=effective_timeout, bounded_capture=bounded_capture
         )
-        self._update_cwd(result)
-        result["final_cwd"] = self.cwd
+        final_cwd = self._update_cwd(result)
+        if include_final_cwd and final_cwd:
+            result["final_cwd"] = final_cwd
 
         return result
 

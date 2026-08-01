@@ -3,6 +3,7 @@
 import json
 from types import SimpleNamespace
 
+import agent.runtime_cwd as rc
 import tools.terminal_tool as terminal_tool
 
 
@@ -29,7 +30,8 @@ def test_foreground_command_uses_registered_task_cwd_for_existing_environment(mo
     task_id = "acp-session-1"
     monkeypatch.setattr(terminal_tool, "_active_environments", {task_id: FakeEnv()})
     monkeypatch.setattr(terminal_tool, "_last_activity", {})
-    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {task_id: {"cwd": "/workspace/acp"}})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+    rc.record_session_cwd(task_id, "/workspace/acp")
     monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: _minimal_terminal_config())
     monkeypatch.setattr(
         terminal_tool,
@@ -40,7 +42,17 @@ def test_foreground_command_uses_registered_task_cwd_for_existing_environment(mo
     result = json.loads(terminal_tool.terminal_tool(command="pwd", task_id=task_id))
 
     assert result["exit_code"] == 0
-    assert calls == [("pwd", {"timeout": 60, "cwd": "/workspace/acp", "bounded_capture": True})]
+    assert calls == [
+        (
+            "pwd",
+            {
+                "timeout": 60,
+                "cwd": "/workspace/acp",
+                "bounded_capture": True,
+                "include_final_cwd": True,
+            },
+        )
+    ]
 
 
 def test_explicit_workdir_still_wins_over_registered_task_cwd(monkeypatch):
@@ -56,7 +68,8 @@ def test_explicit_workdir_still_wins_over_registered_task_cwd(monkeypatch):
     task_id = "acp-session-1"
     monkeypatch.setattr(terminal_tool, "_active_environments", {task_id: FakeEnv()})
     monkeypatch.setattr(terminal_tool, "_last_activity", {})
-    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {task_id: {"cwd": "/workspace/acp"}})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+    rc.record_session_cwd(task_id, "/workspace/acp")
     monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: _minimal_terminal_config())
     monkeypatch.setattr(
         terminal_tool,
@@ -73,7 +86,14 @@ def test_explicit_workdir_still_wins_over_registered_task_cwd(monkeypatch):
     )
 
     assert result["exit_code"] == 0
-    assert calls == [{"timeout": 60, "cwd": "/explicit/workdir", "bounded_capture": True}]
+    assert calls == [
+        {
+            "timeout": 60,
+            "cwd": "/explicit/workdir",
+            "bounded_capture": True,
+            "include_final_cwd": True,
+        }
+    ]
 
 
 def test_background_command_prefers_recorded_session_cwd_over_init_time_cwd(monkeypatch):
@@ -98,8 +118,8 @@ def test_background_command_prefers_recorded_session_cwd_over_init_time_cwd(monk
     task_id = "session-live-cwd-bg"
     monkeypatch.setattr(terminal_tool, "_active_environments", {task_id: FakeEnv()})
     monkeypatch.setattr(terminal_tool, "_last_activity", {})
-    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
-    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {task_id: {"cwd": "/workspace/init"}})
+    monkeypatch.setattr(rc, "_SESSION_CWDS", {})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
     monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: _minimal_terminal_config(cwd="/workspace/init"))
     monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
     monkeypatch.setattr(terminal_tool, "_resolve_container_task_id", lambda value: value or "default")
@@ -109,7 +129,7 @@ def test_background_command_prefers_recorded_session_cwd_over_init_time_cwd(monk
         lambda command, env_type, **kwargs: {"approved": True},
     )
     monkeypatch.setattr(process_registry_mod, "process_registry", registry)
-    terminal_tool.record_session_cwd(task_id, "/workspace/live")
+    rc.record_session_cwd(task_id, "/workspace/live")
 
     result = json.loads(
         terminal_tool.terminal_tool(

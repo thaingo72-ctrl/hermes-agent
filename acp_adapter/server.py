@@ -2068,9 +2068,13 @@ class HermesACPAgent(acp.Agent):
         # teardown.
         def _dispatch() -> str | None:
             try:
-                from agent.runtime_cwd import set_session_cwd
+                from agent.runtime_cwd import (
+                    bind_current_session_key,
+                    initialize_session_cwd,
+                )
 
-                set_session_cwd(state.cwd)
+                initialize_session_cwd(state.session_id, state.cwd)
+                bind_current_session_key(state.session_id)
             except Exception:
                 logger.debug("Could not pin ACP session cwd for slash command", exc_info=True)
             return handler(args, state)

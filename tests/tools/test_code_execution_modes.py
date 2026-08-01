@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
+import agent.runtime_cwd as rc
 
 os.environ["TERMINAL_ENV"] = "local"
 
@@ -121,19 +122,15 @@ class TestResolveChildCwd(unittest.TestCase):
             self.assertEqual(_resolve_child_cwd("project", "/tmp/staging"), os.getcwd())
 
 
-    def test_project_stale_record_falls_through_to_override(self):
-        """A recorded directory that no longer exists is skipped; the
-        registered override is the next rung."""
+    def test_project_uses_authoritative_runtime_record(self):
+        """Project mode reads the runtime CWD record directly."""
         import tempfile
-        import tools.terminal_tool as terminal_tool
 
         with tempfile.TemporaryDirectory() as reg:
-            task_id = "stale-record-test"
+            task_id = "record-test"
             with patch.dict(os.environ, {"TERMINAL_CWD": "/does/not/exist"}):
-                with patch.object(terminal_tool, "_task_env_overrides", {}, create=False), \
-                     patch.object(terminal_tool, "_session_cwd", {}, create=False):
-                    terminal_tool.register_task_env_overrides(task_id, {"cwd": reg})
-                    terminal_tool.record_session_cwd(task_id, "/deleted/dir/gone")
+                with patch.object(rc, "_SESSION_CWDS", {}, create=False):
+                    rc.record_session_cwd(task_id, reg)
                     self.assertEqual(
                         _resolve_child_cwd("project", "/tmp/staging", task_id=task_id), reg
                     )

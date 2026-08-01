@@ -1,9 +1,16 @@
 """Tests for _resolve_path() — TERMINAL_CWD-aware path resolution in file_tools."""
 
-import os
 from pathlib import Path
-from types import SimpleNamespace
 
+import agent.runtime_cwd as rc
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clear_default_runtime_cwd():
+    rc.clear_session_cwd("default")
+    yield
+    rc.clear_session_cwd("default")
 
 class TestResolvePath:
     """Verify _resolve_path respects TERMINAL_CWD for worktree isolation."""
@@ -25,15 +32,15 @@ class TestResolvePath:
         live_dir.mkdir()
         monkeypatch.setenv("TERMINAL_CWD", str(start_dir))
 
-        from tools import file_tools, terminal_tool
+        from tools import file_tools
 
         task_id = "live-cwd"
         # The session's completed `cd` recorded the new directory.
-        terminal_tool.record_session_cwd(task_id, str(live_dir))
+        rc.record_session_cwd(task_id, str(live_dir))
 
         try:
             result = file_tools._resolve_path("nested/file.txt", task_id=task_id)
         finally:
-            terminal_tool.clear_session_cwd(task_id)
+            rc.clear_session_cwd(task_id)
 
         assert result == live_dir / "nested" / "file.txt"

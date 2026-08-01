@@ -2280,6 +2280,11 @@ def _heal_dead_cwd(cwd: str) -> str:
 
 def _is_local_terminal_backend() -> bool:
     backend = (os.environ.get("TERMINAL_ENV") or "").strip().lower()
+    if not backend:
+        cfg = _load_cfg()
+        terminal_cfg = cfg.get("terminal") if isinstance(cfg, dict) else None
+        if isinstance(terminal_cfg, dict):
+            backend = str(terminal_cfg.get("backend") or "").strip().lower()
     return not backend or backend == "local"
 
 
@@ -2329,7 +2334,7 @@ def _reconcile_session_cwd_from_terminal(session: dict | None) -> bool:
         return False
 
     try:
-        from tools.terminal_tool import get_session_cwd
+        from agent.runtime_cwd import get_session_cwd
 
         recorded = get_session_cwd(session.get("session_key") or "")
     except Exception:
@@ -2394,11 +2399,9 @@ def _register_session_cwd(session: dict | None) -> None:
     if not session:
         return
     try:
-        from tools.terminal_tool import register_task_env_overrides
+        from agent.runtime_cwd import record_session_cwd
 
-        register_task_env_overrides(
-            session["session_key"], {"cwd": _terminal_task_cwd(session)}
-        )
+        record_session_cwd(session["session_key"], _terminal_task_cwd(session))
     except Exception:
         pass
 
@@ -2649,7 +2652,7 @@ def _set_session_cwd(session: dict, cwd: str) -> str:
     try:
         from tools import terminal_tool
 
-        terminal_tool.cleanup_vm(session["session_key"])
+        terminal_tool.cleanup_task_environment(session["session_key"])
     except Exception:
         pass
     session["cwd"] = resolved

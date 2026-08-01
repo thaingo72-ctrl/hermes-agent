@@ -17,6 +17,7 @@ Both paths now share ``_is_unusable_container_cwd()``; these tests pin its
 behaviour so neither path can regress.
 """
 
+import agent.runtime_cwd as rc
 import tools.terminal_tool as tt
 
 
@@ -90,11 +91,11 @@ class TestOverrideCwdSanitizedAtCallSite:
         monkeypatch.setattr(tt, "_last_activity", {})
 
         task_id = "sess-host-cwd"
-        tt.register_task_env_overrides(task_id, {"cwd": override_cwd})
+        rc.record_session_cwd(task_id, override_cwd)
         try:
             tt.terminal_tool(command="pwd", task_id=task_id)
         finally:
-            tt.clear_task_env_overrides(task_id)
+            rc.clear_session_cwd(task_id)
             tt._active_environments.pop(task_id, None)
             tt._active_environments.pop("default", None)
         return captured.get("cwd")
@@ -179,14 +180,14 @@ class TestFileOpsCwdSanitizedAtCallSite:
         monkeypatch.setattr(tt, "_active_environments", {})
         monkeypatch.setattr(tt, "_last_activity", {})
         monkeypatch.setattr(ft, "_file_ops_cache", {})
-        monkeypatch.setattr(tt, "_session_cwd", {})
+        monkeypatch.setattr(rc, "_SESSION_CWDS", {})
 
         task_id = "sess-fileops-host-cwd"
-        tt.register_task_env_overrides(task_id, {"cwd": override_cwd})
+        rc.record_session_cwd(task_id, override_cwd)
         try:
             ft._get_file_ops(task_id)
         finally:
-            tt.clear_task_env_overrides(task_id)
+            rc.clear_session_cwd(task_id)
         return captured.get("cwd")
 
     def test_macos_host_override_does_not_reach_container(self, monkeypatch):

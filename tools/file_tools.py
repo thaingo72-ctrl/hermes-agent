@@ -9,6 +9,7 @@ import posixpath
 import sys
 import threading
 from pathlib import Path, PurePosixPath
+from dataclasses import dataclass
 
 from agent.file_safety import get_read_block_error
 from tools.binary_extensions import has_binary_extension
@@ -235,12 +236,63 @@ def _normalize_without_host_deref(path: str | Path | PurePosixPath) -> PurePosix
     return PurePosixPath(posixpath.normpath(str(path)))
 
 
+@dataclass(frozen=True)
+class _PathResolutionSnapshot:
+    task_id: str
+    backend: str
+    cwd: str | None
+    remote_home: str | None = None
+
+    @property
+    def uses_remote_posix_paths(self) -> bool:
+        return self.backend in _REMOTE_POSIX_PATH_BACKENDS
+
+    @property
+    def uses_container_paths(self) -> bool:
+        try:
+            from tools.terminal_tool import _CONTAINER_BACKENDS
+            return self.backend in _CONTAINER_BACKENDS
+        except Exception:
+            return self.backend in _CONTAINER_PATH_BACKENDS_FALLBACK
+
+
+def _path_resolution_snapshot(task_id: str = "default") -> _PathResolutionSnapshot:
+    env = _active_environment_for_task(task_id)
+    backend = _terminal_env_type_for_task(task_id)
+    cwd = None
+    try:
+        from agent.runtime_cwd import get_session_cwd
+
+        cwd = get_session_cwd(task_id)
+    except Exception:
+        cwd = None
+    if cwd is None and env is not None:
+        cwd = getattr(env, "cwd", None)
+    remote_home = getattr(env, "_remote_home", None) if env is not None else None
+    if isinstance(remote_home, str) and remote_home.strip():
+        remote_home = posixpath.normpath(remote_home.strip())
+    else:
+        remote_home = None
+    return _PathResolutionSnapshot(
+        task_id=task_id,
+        backend=backend,
+        cwd=cwd,
+        remote_home=remote_home,
+    )
+
+
+def _remote_home_for_snapshot(snapshot: _PathResolutionSnapshot) -> str:
+    if snapshot.remote_home:
+        return snapshot.remote_home
+    raise RuntimeError("remote path context is unavailable for this task")
+
+
 def _remote_home_for_task(task_id: str = "default") -> str:
     env = _active_environment_for_task(task_id)
     home = getattr(env, "_remote_home", None)
     if isinstance(home, str) and home.strip():
         return posixpath.normpath(home.strip())
-    return "/root"
+    raise RuntimeError("remote path context is unavailable for this task")
 
 
 def _expand_remote_tilde(path: str, task_id: str = "default") -> str:
@@ -248,6 +300,14 @@ def _expand_remote_tilde(path: str, task_id: str = "default") -> str:
         return _remote_home_for_task(task_id)
     if path.startswith("~/"):
         return posixpath.join(_remote_home_for_task(task_id), path[2:])
+    return path
+
+
+def _expand_remote_tilde_snapshot(path: str, snapshot: _PathResolutionSnapshot) -> str:
+    if path == "~":
+        return _remote_home_for_snapshot(snapshot)
+    if path.startswith("~/"):
+        return posixpath.join(_remote_home_for_snapshot(snapshot), path[2:])
     return path
 
 
@@ -293,7 +353,7 @@ def _configured_terminal_cwd() -> str | None:
 def _authoritative_workspace_root(task_id: str = "default") -> str | None:
     """Best-effort absolute workspace root for local path divergence checks."""
     try:
-        from tools.terminal_tool import get_session_cwd
+        from agent.runtime_cwd import get_session_cwd
 
         recorded = get_session_cwd(task_id)
     except Exception:
@@ -301,6 +361,45 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
     if recorded:
         return recorded
     return _configured_terminal_cwd()
+
+
+def _resolve_path_with_snapshot(
+    filepath: str,
+    snapshot: _PathResolutionSnapshot,
+) -> Path | PurePosixPath:
+    if snapshot.uses_remote_posix_paths:
+        expanded = _expand_remote_tilde_snapshot(filepath, snapshot)
+        if posixpath.isabs(expanded):
+            return _normalize_without_host_deref(expanded)
+        base_text = _expand_remote_tilde_snapshot(str(snapshot.cwd or "~"), snapshot)
+        if not posixpath.isabs(base_text):
+            base_text = posixpath.join(_remote_home_for_snapshot(snapshot), base_text)
+        return _normalize_without_host_deref(PurePosixPath(base_text) / expanded)
+
+    container_paths = snapshot.uses_container_paths
+    if os.path.isabs(_expand_tilde(filepath)):
+        if container_paths:
+            return _normalize_without_host_deref(_expand_tilde(filepath))
+        return Path(_expand_tilde(filepath)).resolve()
+    root = snapshot.cwd or _configured_terminal_cwd() or os.getcwd()
+    base_text = _expand_tilde(root)
+    if container_paths:
+        if not posixpath.isabs(base_text):
+            base_text = posixpath.join(os.getcwd(), base_text)
+        return _normalize_without_host_deref(PurePosixPath(base_text) / filepath)
+    from tools.environments.local import _msys_to_windows_path
+
+    base_text = _msys_to_windows_path(base_text)
+    base = Path(base_text)
+    if not base.is_absolute():
+        base = Path(os.getcwd()) / base
+    return (base / filepath).resolve()
+
+
+def _ensure_remote_path_context(task_id: str = "default") -> None:
+    """Ensure remote backends have detected home/cwd before path resolution."""
+    if _uses_remote_posix_paths(task_id) and _active_environment_for_task(task_id) is None:
+        _get_file_ops(task_id)
 
 
 def _resolve_base_dir(
@@ -371,13 +470,10 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path | Pu
     translated to ``C:\\Users\\...`` before resolution so file tools don't
     treat them as relative ``\\c\\Users\\...`` under the process cwd.
     """
-    container_paths = _uses_container_paths(task_id)
-    if _uses_remote_posix_paths(task_id):
-        expanded = _expand_remote_tilde(filepath, task_id)
-        if posixpath.isabs(expanded):
-            return _normalize_without_host_deref(expanded)
-        resolved = _resolve_remote_posix_base(task_id) / expanded
-        return _normalize_without_host_deref(resolved)
+    snapshot = _path_resolution_snapshot(task_id)
+    container_paths = snapshot.uses_container_paths
+    if snapshot.uses_remote_posix_paths:
+        return _resolve_path_with_snapshot(filepath, snapshot)
     if container_paths:
         expanded = _expand_tilde(filepath)
         if posixpath.isabs(expanded):
@@ -519,20 +615,21 @@ def _is_blocked_device(filepath: str, base_dir: str | Path | None = None) -> boo
     return False
 
 
-def _rewrite_v4a_patch_paths_for_task(patch_content: str, task_id: str = "default") -> str:
-    """Rewrite V4A file headers to task-resolved paths before backend apply."""
+def _rewrite_v4a_patch_paths_from_map(
+    patch_content: str,
+    resolved_paths: dict[str, str],
+) -> str:
+    """Rewrite V4A file headers from a pre-resolved immutable path map."""
     import re as _re
 
-    def _resolved(path_text: str) -> str:
-        return str(_resolve_path_for_task(path_text.strip(), task_id))
-
     def _replace_file_header(match: _re.Match[str]) -> str:
-        return f"*** {match.group(1)} File: {_resolved(match.group(2))}"
+        original = match.group(2).strip()
+        return f"*** {match.group(1)} File: {resolved_paths[original]}"
 
     def _replace_move_header(match: _re.Match[str]) -> str:
-        src = _resolved(match.group(1))
-        dst = _resolved(match.group(2))
-        return f"*** Move File: {src} -> {dst}"
+        src = match.group(1).strip()
+        dst = match.group(2).strip()
+        return f"*** Move File: {resolved_paths[src]} -> {resolved_paths[dst]}"
 
     rewritten = _re.sub(
         r'^\*\*\*\s*(Update|Add|Delete)\s+File:\s*(.+)$',
@@ -604,6 +701,10 @@ _SENSITIVE_PATH_PREFIXES = (
     "/private/etc/", "/private/var/",
 )
 _SENSITIVE_EXACT_PATHS = {"/var/run/docker.sock", "/run/docker.sock"}
+_NON_SENSITIVE_PATH_PREFIXES = (
+    "/private/var/folders/",
+    "/var/folders/",
+)
 
 _hermes_config_resolved: str | None = None
 _hermes_config_resolved_loaded = False
@@ -632,7 +733,23 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
         resolved = str(_resolve_path_for_task(filepath, task_id))
     except (OSError, ValueError):
         resolved = filepath
+    return _check_sensitive_resolved_path(filepath, resolved)
+
+
+def _check_sensitive_resolved_path(filepath: str, resolved: str) -> str | None:
     normalized = os.path.normpath(_expand_tilde(filepath))
+    hermes_config = _get_hermes_config_resolved()
+    if hermes_config and (resolved == hermes_config or normalized == hermes_config):
+        return (
+            f"Refusing to write to Hermes config file: {filepath}\n"
+            "Agent cannot modify security-sensitive configuration. "
+            "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
+        )
+    if any(
+        resolved.startswith(prefix) or normalized.startswith(prefix)
+        for prefix in _NON_SENSITIVE_PATH_PREFIXES
+    ):
+        return None
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
@@ -642,17 +759,6 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             return _err
     if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
         return _err
-    # Prevent agents from modifying the Hermes config file directly.
-    # approvals.mode and other security settings live here; a malicious or
-    # prompt-injected agent could silently disable exec approval by writing to
-    # this file.
-    hermes_config = _get_hermes_config_resolved()
-    if hermes_config and (resolved == hermes_config or normalized == hermes_config):
-        return (
-            f"Refusing to write to Hermes config file: {filepath}\n"
-            "Agent cannot modify security-sensitive configuration. "
-            "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
-        )
     return None
 
 
@@ -747,6 +853,25 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
     return get_container_mirror_warning(
         resolved,
         mirror_prefix=_get_container_mirror_prefix_for_task(task_id),
+    )
+
+
+def _check_cross_profile_resolved_path(resolved: str, task_id: str = "default") -> str | None:
+    try:
+        from agent.file_safety import (
+            get_container_mirror_warning,
+            get_cross_profile_warning,
+            get_sandbox_mirror_warning,
+        )
+    except Exception:
+        return None
+    return (
+        get_cross_profile_warning(resolved)
+        or get_sandbox_mirror_warning(resolved)
+        or get_container_mirror_warning(
+            resolved,
+            mirror_prefix=_get_container_mirror_prefix_for_task(task_id),
+        )
     )
 
 
@@ -1005,7 +1130,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                 old_cwd = getattr(cached, "cwd", None)
                 if old_cwd:
                     try:
-                        from tools.terminal_tool import record_session_cwd
+                        from agent.runtime_cwd import record_session_cwd
                         record_session_cwd(raw_task_id, old_cwd)
                     except Exception:
                         pass
@@ -1046,12 +1171,10 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
             else:
                 image = ""
 
-            try:
-                from tools.terminal_tool import get_session_cwd
-                recorded_cwd = get_session_cwd(raw_task_id)
-            except Exception:
-                recorded_cwd = None
-            cwd = recorded_cwd or overrides.get("cwd") or config["cwd"]
+            from agent.runtime_cwd import get_session_cwd, initialize_session_cwd
+
+            initialize_session_cwd(raw_task_id, config["cwd"])
+            cwd = get_session_cwd(raw_task_id)
             # Re-apply the container cwd guard that _get_env_config() already
             # ran on config["cwd"] (see #50636). A recorded local cwd or
             # per-task cwd override is a raw host path (e.g. a Desktop
@@ -1143,6 +1266,7 @@ def clear_file_ops_cache(task_id: str = None):
 def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = "default") -> str:
     """Read a file with pagination and line numbers."""
     try:
+        _ensure_remote_path_context(task_id)
         offset, limit = normalize_read_pagination(offset, limit)
 
         # ── Device path guard ─────────────────────────────────────────
@@ -1606,6 +1730,7 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     Pass ``True`` after explicit user direction — same shape as ``force``
     on the terminal tool.
     """
+    _ensure_remote_path_context(task_id)
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
@@ -1688,6 +1813,7 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     targets under another profile's skills/plugins/cron/memories
     directory. Same shape as ``write_file``'s flag.
     """
+    _ensure_remote_path_context(task_id)
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
     _paths_to_check = []
     if path:
@@ -1733,12 +1859,26 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                 if _err:
                     return _err
                 _paths_to_check.append(v4a_path)
+    file_ops = None
+    snapshot = _path_resolution_snapshot(task_id)
+    if snapshot.uses_remote_posix_paths and snapshot.remote_home is None:
+        file_ops = _get_file_ops(task_id)
+        snapshot = _path_resolution_snapshot(task_id)
+
+    _path_to_resolved: dict[str, str] = {}
     for _p in _paths_to_check:
-        sensitive_err = _check_sensitive_path(_p, task_id)
+        try:
+            _path_to_resolved[_p] = str(_resolve_path_with_snapshot(_p, snapshot))
+        except Exception:
+            _path_to_resolved[_p] = _p
+
+    for _p in _paths_to_check:
+        _resolved = _path_to_resolved[_p]
+        sensitive_err = _check_sensitive_resolved_path(_p, _resolved)
         if sensitive_err:
             return tool_error(sensitive_err)
         if not cross_profile:
-            cross_warning = _check_cross_profile_path(_p, task_id)
+            cross_warning = _check_cross_profile_resolved_path(_resolved, task_id)
             if cross_warning:
                 return tool_error(cross_warning)
     try:
@@ -1748,10 +1888,7 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
         _resolved_paths: list[str] = []
         _seen: set[str] = set()
         for _p in _paths_to_check:
-            try:
-                _r = str(_resolve_path_for_task(_p, task_id))
-            except Exception:
-                _r = None
+            _r = _path_to_resolved.get(_p)
             if _r and _r not in _seen:
                 _resolved_paths.append(_r)
                 _seen.add(_r)
@@ -1768,13 +1905,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             # Collect warnings — cross-agent registry first (names sibling),
             # then per-task tracker as a fallback.
             stale_warnings: list[str] = []
-            _path_to_resolved: dict[str, str] = {}
             for _p in _paths_to_check:
-                try:
-                    _r = str(_resolve_path_for_task(_p, task_id))
-                except Exception:
-                    _r = None
-                _path_to_resolved[_p] = _r
+                _r = _path_to_resolved.get(_p)
                 _cross = file_state.check_stale(task_id, _r) if _r else None
                 _sw = _cross or _check_file_staleness(_p, task_id)
                 if not _sw and _r:
@@ -1784,7 +1916,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                 if _sw:
                     stale_warnings.append(_sw)
 
-            file_ops = _get_file_ops(task_id)
+            if file_ops is None:
+                file_ops = _get_file_ops(task_id)
 
             if mode == "replace":
                 if not path:
@@ -1801,7 +1934,9 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             elif mode == "patch":
                 if not patch:
                     return tool_error("patch content required")
-                resolved_patch = _rewrite_v4a_patch_paths_for_task(patch, task_id)
+                resolved_patch = _rewrite_v4a_patch_paths_from_map(
+                    patch, _path_to_resolved
+                )
                 result = file_ops.patch_v4a(resolved_patch)
             else:
                 return tool_error(f"Unknown mode: {mode}")

@@ -1135,53 +1135,6 @@ def _maybe_reap_docker_orphans(container_config: Dict[str, Any]) -> None:
 # Thread-safe because each task_id is unique per rollout.
 _task_env_overrides: Dict[str, Dict[str, Any]] = {}
 
-# ── Per-session runtime CWD records ─────────────────────────────────────────
-#
-# The durable source of truth for "which directory is THIS session working
-# in". Keyed by the raw session/task key (NOT the collapsed container id):
-# the terminal env is shared across sessions, so any cwd state stored on the
-# env is a global mutable timeshared between sessions — the root cause of the
-# wrong-worktree bug class (env.cwd_owner stamping, _last_known_cwd, and the
-# ownership ladder in file_tools are all patches over that misplacement).
-_session_cwd: Dict[str, str] = {}
-_session_cwd_lock = threading.Lock()
-
-
-def record_session_cwd(session_key: Optional[str], cwd: Optional[str]) -> None:
-    """Record *cwd* as the working directory of *session_key*.
-
-    Called wherever a session's live cwd becomes known: after a terminal
-    command completes (the env's post-command tracking has just parsed the
-    resulting cwd) and when a surface registers a workspace cwd override.
-    Empty/None session keys collapse to ``"default"`` (single-session CLI).
-    Non-string / empty cwds are ignored.
-    """
-    if not isinstance(cwd, str) or not cwd.strip():
-        return
-    key = str(session_key or "default")
-    with _session_cwd_lock:
-        if _session_cwd.get(key) != cwd:
-            _session_cwd[key] = cwd
-
-
-def get_session_cwd(session_key: Optional[str]) -> Optional[str]:
-    """Return the recorded working directory for *session_key*, if any.
-
-    No fallback chain here on purpose: callers decide what an absent record
-    means (config default, TERMINAL_CWD seed, process cwd). ``None``/empty
-    keys read the ``"default"`` record.
-    """
-    key = str(session_key or "default")
-    with _session_cwd_lock:
-        return _session_cwd.get(key)
-
-
-def clear_session_cwd(session_key: str) -> None:
-    """Drop a session's cwd record (session teardown)."""
-    with _session_cwd_lock:
-        _session_cwd.pop(session_key, None)
-
-
 def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
     """
     Register environment overrides for a specific task/rollout.
@@ -1192,34 +1145,19 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
     Supported override keys:
         - modal_image: str -- Path to Dockerfile or Docker Hub image name
         - docker_image: str -- Docker image name
-        - cwd: str -- Working directory inside the sandbox
+        - cwd: str -- Initial authoritative CWD for this task
 
     Args:
         task_id: The rollout's unique task identifier
         overrides: Dict of config keys to override
     """
-    _task_env_overrides[task_id] = overrides
+    runtime_overrides = dict(overrides)
+    initial_cwd = runtime_overrides.pop("cwd", None)
+    if initial_cwd:
+        from agent.runtime_cwd import initialize_session_cwd
 
-    # If a live environment already exists for this task, a freshly registered
-    # ``cwd`` override (e.g. the ACP client switching the editor's project root
-    # mid-session via ``session/load`` / ``session/resume``) must take effect
-    # immediately. The session record is what commands resolve against;
-    # the live env's cwd is also updated so env-side seeding stays consistent.
-    new_cwd = overrides.get("cwd")
-    if isinstance(new_cwd, str) and new_cwd.strip():
-        # A registered workspace cwd IS the session's working directory until
-        # a `cd` changes it.
-        record_session_cwd(task_id, new_cwd)
-        # The live env is cached under the raw task_id for per-session surfaces
-        # (ACP/gateway/dashboard) and under the collapsed container id for
-        # isolation-keyed rollouts. Try the raw id first, then the container id,
-        # so a CWD-only override (which collapses to "default") still finds and
-        # updates the originating session's env.
-        container_id = _resolve_container_task_id(task_id)
-        with _env_lock:
-            env = _active_environments.get(task_id) or _active_environments.get(container_id)
-        if env is not None and getattr(env, "cwd", None) is not None:
-            env.cwd = new_cwd
+        initialize_session_cwd(task_id, str(initial_cwd))
+    _task_env_overrides[task_id] = runtime_overrides
 
 
 def clear_task_env_overrides(task_id: str):
@@ -1233,6 +1171,8 @@ def clear_task_env_overrides(task_id: str):
 
 def teardown_session_runtime_cwd(task_id: str) -> None:
     """Clear all runtime CWD state for a true session/task teardown."""
+    from agent.runtime_cwd import clear_session_cwd
+
     clear_task_env_overrides(task_id)
     clear_session_cwd(task_id)
 
@@ -1940,6 +1880,19 @@ def cleanup_vm(task_id: str, *, force_remove: bool = False):
             logger.warning("Error cleaning up environment for task %s: %s", task_id, e)
 
 
+def cleanup_task_environment(task_id: str = "default") -> None:
+    """Release backend resources for a logical task or session.
+
+    Logical task IDs may share the ``default`` backend. Keep that mapping an
+    implementation detail of the terminal tool rather than coupling callers
+    to ``_resolve_container_task_id``.
+    """
+    resolved = _resolve_container_task_id(task_id)
+    with _env_lock:
+        environment_key = task_id if task_id in _active_environments else resolved
+    cleanup_vm(environment_key)
+
+
 def _atexit_cleanup():
     """Stop cleanup thread and shut down all remaining sandboxes on exit."""
     _stop_cleanup_thread()
@@ -2181,7 +2134,11 @@ def _resolve_command_cwd(
     """
     if workdir:
         return workdir
-    return get_session_cwd(session_key) or default_cwd
+    from agent.runtime_cwd import get_session_cwd, initialize_session_cwd
+
+    initialize_session_cwd(session_key, default_cwd)
+    recorded = get_session_cwd(session_key)
+    return recorded if recorded is not None else default_cwd
 
 
 def terminal_tool(
@@ -2270,7 +2227,10 @@ def terminal_tool(
         else:
             image = ""
 
-        cwd = get_session_cwd(task_id) or overrides.get("cwd") or config["cwd"]
+        from agent.runtime_cwd import initialize_session_cwd, get_session_cwd
+
+        initialize_session_cwd(task_id, config["cwd"])
+        cwd = get_session_cwd(task_id)
         # A session record or per-task cwd override can beat config["cwd"], but
         # config["cwd"] was already sanitized for container backends in
         # _get_env_config() while those session values are raw. On a container
@@ -2818,6 +2778,10 @@ def terminal_tool(
                         # Internal env.execute() consumers (file ops cat
                         # reads, RPC reads) intentionally stay unbounded.
                         "bounded_capture": True,
+                        # Call-local CWD metadata is an internal terminal-tool
+                        # channel, not part of BaseEnvironment's public result
+                        # contract.
+                        "include_final_cwd": True,
                     }
                     result = env.execute(command, **execute_kwargs)
                 except Exception as e:
@@ -2851,6 +2815,7 @@ def terminal_tool(
 
             final_cwd = result.get("final_cwd") if isinstance(result, dict) else None
             if isinstance(final_cwd, str) and final_cwd.strip():
+                from agent.runtime_cwd import record_session_cwd
                 record_session_cwd(session_key, final_cwd)
 
             # Extract output
@@ -2934,8 +2899,6 @@ def terminal_tool(
                 "exit_code": returncode,
                 "error": None,
             }
-            if isinstance(final_cwd, str) and final_cwd.strip():
-                result_dict["final_cwd"] = final_cwd
             try:
                 from agent.verification_evidence import record_terminal_result
 
