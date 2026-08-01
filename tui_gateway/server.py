@@ -13187,6 +13187,7 @@ from . import (  # noqa: E402
     methods_config as _methods_config,
     methods_prompt as _methods_prompt,
     methods_session as _methods_session,
+    methods_session_meta as _methods_session_meta,
     methods_tools as _methods_tools,
 )
 
@@ -13204,3 +13205,21 @@ for _m in (
 ):
     _m.register(sys.modules[__name__])
 del _m
+
+_methods_session_meta.register(
+    _methods,
+    services=_methods_session_meta.default_session_meta_services(
+        ok=_ok,
+        err=_err,
+        db_unavailable_error=_db_unavailable_error,
+        sess_nowait=lambda params, rid: _sess_nowait(params, rid),
+        get_session=lambda session_id: _sessions.get(session_id),
+        session_db=lambda session: _session_db(session),
+        ensure_session_db_row=lambda session: _ensure_session_db_row(session),
+        session_usage_snapshot=lambda session: _session_usage_snapshot(session),
+        get_usage=lambda agent: _get_usage(agent),
+        metadata_mirror=lambda session: _metadata_mirror(session),
+        main_runtime_from_agent=lambda agent: _main_runtime_from_agent(agent),
+        warn=logger.warning,
+    ),
+)
