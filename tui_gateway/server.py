@@ -13187,12 +13187,59 @@ from . import (  # noqa: E402
     methods_config as _methods_config,
     methods_prompt as _methods_prompt,
     methods_session as _methods_session,
+    methods_system as _methods_system,
     methods_tools as _methods_tools,
 )
+
+
+def _set_mcp_reload_gen(value: int) -> None:
+    global _mcp_reload_gen
+
+    _mcp_reload_gen = int(value)
+
+
+def _set_mcp_reload_loaded_rev(value: str) -> None:
+    global _mcp_reload_loaded_rev
+
+    _mcp_reload_loaded_rev = str(value)
+
 
 _methods_billing.register(
     _methods,
     services=_methods_billing.default_billing_services(emit=_emit),
+)
+
+_methods_system.register(
+    _methods,
+    services=_methods_system.SystemServices(
+        sessions=_sessions,
+        sessions_lock=_sessions_lock,
+        get_mcp_reload_lock=lambda: _mcp_reload_lock,
+        get_mcp_reload_gen=lambda: _mcp_reload_gen,
+        set_mcp_reload_gen=_set_mcp_reload_gen,
+        get_mcp_reload_loaded_rev=lambda: _mcp_reload_loaded_rev,
+        set_mcp_reload_loaded_rev=_set_mcp_reload_loaded_rev,
+        compute_mcp_rev=lambda: _compute_mcp_rev(),
+        skill_usage_lookup=lambda: _skill_usage_lookup(),
+        sess=lambda params, rid: _sess(params, rid),
+        load_cfg=lambda: _load_cfg(),
+        load_enabled_toolsets=lambda: _load_enabled_toolsets(),
+        session_uses_compute_host=lambda session: _session_uses_compute_host(session),
+        get_compute_host_supervisor=lambda: _get_compute_host_supervisor(),
+        emit=_emit,
+        session_info=lambda agent, session=None: _session_info(agent, session),
+        call_method=lambda name, rid, params: _methods[name](rid, params),
+        apply_model_switch=_apply_model_switch,
+        resolve_session_platform=lambda: _resolve_session_platform(),
+        skill_scaffold_projection=lambda content: _skill_scaffold_projection(content),
+        load_tool_progress_mode=lambda: _load_tool_progress_mode(),
+        get_db=lambda: _get_db(),
+        db_unavailable_error=lambda rid, **kwargs: _db_unavailable_error(rid, **kwargs),
+        compress_session_history=_compress_session_history,
+        sync_session_key_after_compress=_sync_session_key_after_compress,
+        send_compute_host_control=_send_compute_host_control,
+        apply_compute_host_metadata_mirror=_apply_compute_host_metadata_mirror,
+    ),
 )
 
 for _m in (
