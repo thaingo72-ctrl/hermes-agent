@@ -83,9 +83,9 @@ class TestMaxTurnsResolution:
 
 
 
-    def test_legacy_root_max_turns_is_used_when_agent_key_exists_without_value(self):
+    def test_root_max_turns_is_ignored_when_agent_key_exists_without_value(self):
         cli_obj = _make_cli(config_overrides={"agent": {}, "max_turns": 77})
-        assert cli_obj.max_turns == 77
+        assert cli_obj.max_turns == 500
 
 
 

@@ -25,6 +25,27 @@ from gateway.session import (
 normalize_whatsapp_identifier = canonical_whatsapp_identifier
 
 
+def test_gateway_skill_slug_uses_canonical_frontmatter_parser(tmp_path, monkeypatch):
+    from gateway.run import _skill_slug_from_frontmatter
+
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text("---\nname: ignored-by-test\n---\nBody\n", encoding="utf-8")
+
+    calls = []
+
+    def fake_parse_frontmatter(content):
+        calls.append(content)
+        return {"name": "Canonical Parser Skill"}, "Body"
+
+    monkeypatch.setattr("agent.skill_utils.parse_frontmatter", fake_parse_frontmatter)
+
+    assert _skill_slug_from_frontmatter(skill_md) == (
+        "canonical-parser-skill",
+        "Canonical Parser Skill",
+    )
+    assert calls
+
+
 class TestSessionSourceRoundtrip:
     def test_full_roundtrip(self):
         source = SessionSource(
@@ -55,6 +76,31 @@ class TestSessionSourceRoundtrip:
         assert restored.platform == Platform.LOCAL
         assert restored.chat_id == "cli"
         assert restored.chat_type == "dm"  # default value preserved
+
+    def test_scope_id_is_the_only_session_source_scope_field(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="channel-123",
+            chat_type="channel",
+            scope_id="guild-123",
+        )
+
+        data = source.to_dict()
+
+        assert data["scope_id"] == "guild-123"
+        assert "guild_id" not in data
+
+    def test_from_dict_ignores_obsolete_guild_id_alias(self):
+        source = SessionSource.from_dict(
+            {
+                "platform": "discord",
+                "chat_id": "channel-123",
+                "chat_type": "channel",
+                "guild_id": "legacy-guild",
+            }
+        )
+
+        assert source.scope_id is None
 
 
 class TestSessionSourceDescription:
@@ -139,7 +185,7 @@ class TestBuildSessionContextPrompt:
                 chat_name="Server",
                 chat_type="group",
                 user_name="alice",
-                guild_id="guild-123",
+                scope_id="guild-123",
                 message_id=msg_id,
             )
             ctx = build_session_context(source, config)
@@ -587,7 +633,7 @@ class TestSlackWorkspaceSessionIsolation:
             user_id="U_SHARED",
         )
         scoped_key = build_session_key(source)
-        legacy_key = build_session_key(replace(source, scope_id=None, guild_id=None))
+        legacy_key = build_session_key(replace(source, scope_id=None))
         store._db = MagicMock()
         store._db.find_latest_gateway_session_for_peer.side_effect = [
             None,
@@ -803,7 +849,7 @@ class TestSlackWorkspaceSessionKeys:
 
         # Then
         assert key == "agent:main:slack:dm:T_ALPHA:D123"
-        unscoped = replace(source, scope_id=None, guild_id=None)
+        unscoped = replace(source, scope_id=None)
         assert build_session_key(unscoped) == "agent:main:slack:dm:D123"
 
 
@@ -850,7 +896,7 @@ class TestSlackWorkspaceSessionKeys:
         # Then
         assert routed.session_id != "ambiguous-legacy-session"
         assert routed.session_key == "agent:main:slack:channel:T_BETA:C123:1700000000.000001"
-        assert store._entries[legacy_key].session_id == "ambiguous-legacy-session"
+        assert legacy_key not in store._entries
 
     def test_matching_workspace_recovers_legacy_session_from_db(
         self, tmp_path, monkeypatch
@@ -1021,35 +1067,43 @@ class TestSessionEntryFromDictSessionKeyTraversalStillRejected:
 
 
 class TestEnsureLoadedSkipsInvalidEntries:
-    """Regression: one bad sessions.json entry must not block valid entries from loading."""
+    """Regression: one bad gateway_routing row must not block valid entries from loading."""
 
-    def test_invalid_entry_skipped_valid_entry_loads(self, tmp_path):
+    def test_invalid_entry_skipped_valid_entry_loads(self, tmp_path, monkeypatch):
         import json
+        import hermes_state
         from gateway.session import SessionStore
         from gateway.config import GatewayConfig
 
-        sessions_file = tmp_path / "sessions.json"
-        sessions_file.write_text(json.dumps({
-            "bad:key": {
-                "session_key": "bad:key",
-                "session_id": "../../evil",
-                "created_at": "2026-01-01T00:00:00",
-                "updated_at": "2026-01-01T00:00:00",
-            },
-            "agent:main:local:dm": {
-                "session_key": "agent:main:local:dm",
-                "session_id": "good123",
-                "created_at": "2026-01-01T00:00:00",
-                "updated_at": "2026-01-01T00:00:00",
-            },
-        }), encoding="utf-8")
-
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        store._db.replace_gateway_routing_entries(
+            {
+                "bad:key": json.dumps(
+                    {
+                        "session_key": "bad:key",
+                        "session_id": "../../evil",
+                        "created_at": "2026-01-01T00:00:00",
+                        "updated_at": "2026-01-01T00:00:00",
+                    }
+                ),
+                "agent:main:local:dm": json.dumps(
+                    {
+                        "session_key": "agent:main:local:dm",
+                        "session_id": "good123",
+                        "created_at": "2026-01-01T00:00:00",
+                        "updated_at": "2026-01-01T00:00:00",
+                    }
+                ),
+            },
+            scope=store._routing_scope(),
+        )
         store._ensure_loaded()
 
         assert "bad:key" not in store._entries
         assert "agent:main:local:dm" in store._entries
         assert store._entries["agent:main:local:dm"].session_id == "good123"
+        store._db.close()
 
 
 class TestSessionStoreEntriesAttribute:
@@ -1139,12 +1193,14 @@ class TestSessionMetadata:
     """SessionEntry metadata should persist arbitrary lightweight state."""
 
 
-    def test_session_metadata_survives_reload(self, tmp_path):
+    def test_session_metadata_survives_reload(self, tmp_path, monkeypatch):
         """Metadata written through the store must survive a full reload
-        from disk (simulated gateway restart)."""
+        from state.db (simulated gateway restart)."""
+        import hermes_state
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         config = GatewayConfig()
         store = SessionStore(sessions_dir=tmp_path, config=config)
-        store._db = None  # force sessions.json path
         source = SessionSource(
             platform=Platform.SLACK,
             chat_id="C123",
@@ -1161,7 +1217,6 @@ class TestSessionMetadata:
         )
 
         reloaded = SessionStore(sessions_dir=tmp_path, config=config)
-        reloaded._db = None
         assert (
             reloaded.get_session_metadata(
                 entry.session_key,
@@ -1169,6 +1224,8 @@ class TestSessionMetadata:
             )
             == "123.456"
         )
+        store._db.close()
+        reloaded._db.close()
 
 
 class TestRewriteTranscriptPreservesReasoning:
@@ -1394,9 +1451,7 @@ class TestGatewayRoutingTable:
         entry.suspended = True
         store.set_model_override(entry.session_key, {"model": "test-model"})
 
-        # Kill the JSON mirror entirely — the DB routing table must carry
-        # the complete entry, not just the key mapping.
-        (tmp_path / "sessions.json").unlink()
+        assert not (tmp_path / "sessions.json").exists()
         store._db.close()
 
         restarted = SessionStore(sessions_dir=tmp_path, config=config)
@@ -1408,8 +1463,8 @@ class TestGatewayRoutingTable:
         assert rehydrated.model_override == {"model": "test-model"}
         restarted._db.close()
 
-    def test_write_sessions_json_false_stops_producing_file(self, tmp_path):
-        config = GatewayConfig(write_sessions_json=False)
+    def test_sessions_json_is_not_produced(self, tmp_path):
+        config = GatewayConfig()
         store = SessionStore(sessions_dir=tmp_path, config=config)
         entry = store.get_or_create_session(self._source())
         assert not (tmp_path / "sessions.json").exists()
@@ -1421,4 +1476,29 @@ class TestGatewayRoutingTable:
         assert recovered.session_id == entry.session_id
         restarted._db.close()
 
+    def test_stale_sessions_json_is_ignored_and_not_rewritten(self, tmp_path):
+        config = GatewayConfig()
+        stale_key = "agent:main:telegram:dm"
+        stale_payload = json.dumps(
+            {
+                stale_key: {
+                    "session_key": stale_key,
+                    "session_id": "stale-session",
+                    "created_at": "2026-01-01T00:00:00",
+                    "updated_at": "2026-01-01T00:00:00",
+                    "platform": "telegram",
+                    "chat_type": "dm",
+                }
+            }
+        )
+        (tmp_path / "sessions.json").write_text(
+            stale_payload,
+            encoding="utf-8",
+        )
 
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+        entry = store.get_or_create_session(self._source())
+
+        assert entry.session_id != "stale-session"
+        assert (tmp_path / "sessions.json").read_text(encoding="utf-8") == stale_payload
+        store._db.close()

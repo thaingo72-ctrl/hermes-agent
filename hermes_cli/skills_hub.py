@@ -1493,18 +1493,9 @@ def do_publish(skill_path: str, target: str = "github", repo: str = "",
         return
 
     # Validate the skill
-    import yaml
+    from agent.skill_utils import parse_frontmatter
     skill_md = (path / "SKILL.md").read_text(encoding="utf-8")
-    skill_md = skill_md.lstrip("\ufeff")  # tolerate UTF-8 BOM (Windows editors)
-    fm = {}
-    if skill_md.startswith("---"):
-        import re
-        match = re.search(r'\n---\s*\n', skill_md[3:])
-        if match:
-            try:
-                fm = yaml.safe_load(skill_md[3:match.start() + 3]) or {}
-            except yaml.YAMLError:
-                pass
+    fm, _ = parse_frontmatter(skill_md)
 
     name = fm.get("name", path.name)
     description = fm.get("description", "")

@@ -891,7 +891,7 @@ class TeamsAdapter(BasePlatformAdapter):
             chat_type=chat_type,
             user_id=str(user_id),
             user_name=user_name,
-            guild_id=getattr(conv, "tenant_id", None) or self._tenant_id,
+            scope_id=getattr(conv, "tenant_id", None) or self._tenant_id,
         )
 
         # Handle attachments (images, documents, video, audio)

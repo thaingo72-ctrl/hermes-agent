@@ -8,9 +8,9 @@ from unittest.mock import patch
 import pytest
 
 import tools.skills_tool as skills_tool_module
+from agent.skill_utils import parse_frontmatter
 from tools.skills_tool import (
     _get_required_environment_variables,
-    _parse_frontmatter,
     _parse_tags,
     _get_category_from_path,
     _find_all_skills,
@@ -57,30 +57,30 @@ def _symlink_category(skills_dir: Path, linked_root: Path, category: str) -> Pat
 
 
 # ---------------------------------------------------------------------------
-# _parse_frontmatter
+# parse_frontmatter
 # ---------------------------------------------------------------------------
 
 
 class TestParseFrontmatter:
     def test_valid_and_nested_frontmatter(self):
         content = "---\nname: test\ndescription: A test.\n---\n\n# Body\n"
-        fm, body = _parse_frontmatter(content)
+        fm, body = parse_frontmatter(content)
         assert fm["name"] == "test"
         assert fm["description"] == "A test."
         assert "# Body" in body
 
         nested = "---\nname: test\nmetadata:\n  hermes:\n    tags: [a, b]\n---\n\nBody.\n"
-        fm, _ = _parse_frontmatter(nested)
+        fm, _ = parse_frontmatter(nested)
         assert fm["metadata"]["hermes"]["tags"] == ["a", "b"]
 
 
     def test_utf8_bom_frontmatter(self):
         """A leading UTF-8 BOM (Windows Notepad / PowerShell ``>`` save) must
         not drop the frontmatter. Confirms the fix reaches the tools/ surface
-        via the _parse_frontmatter re-export."""
+        through the canonical parser."""
         bom = chr(0xFEFF)
         content = bom + "---\nname: test\ndescription: A test.\n---\n\n# Body\n"
-        fm, body = _parse_frontmatter(content)
+        fm, body = parse_frontmatter(content)
         assert fm["name"] == "test"
         assert fm["description"] == "A test."
         assert not body.startswith(bom)

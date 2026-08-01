@@ -1,7 +1,7 @@
 """Tests for SessionStore._prune_stale_sessions_locked — crash self-healing.
 
 When a gateway crashes (exit code 1) the graceful shutdown path is skipped and
-sessions.json is left pointing at sessions already ended in state.db. On the
+gateway_routing is left pointing at sessions already ended in state.db. On the
 next startup _ensure_loaded_locked calls _prune_stale_sessions_locked to detect
 and remove those stale routing entries before get_or_create_session() can reuse
 them and silently route incoming messages into a closed session (#52804).
@@ -90,7 +90,7 @@ class TestPruneStaleSessionsLocked:
 
         Startup pruning sees an ended parent and tries to repoint it to the
         latest live gateway child.  If that recovery query raises, deleting the
-        sessions.json entry loses the routing key entirely; keeping it lets the
+        routing entry loses the routing key entirely; keeping it lets the
         runtime stale guard retry recovery on the next message.
         """
         key = "agent:main:telegram:dm:5140768830"
@@ -117,7 +117,7 @@ class TestPruneStaleSessionsLocked:
         assert "key" in store._entries
 
 
-    def test_sessions_json_rewritten_after_pruning(self, tmp_path):
+    def test_routing_store_rewritten_after_pruning(self, tmp_path):
         db = _db_returning({"sid_stale": {"end_reason": "agent_close", "id": "sid_stale"}})
         store = _make_store_with_db(tmp_path, db)
         store._entries["stale_key"] = _make_entry("stale_key", "sid_stale")
@@ -134,15 +134,16 @@ class TestPruneStaleSessionsLocked:
 class TestEnsureLoadedCallsPrune:
     def test_stale_entry_pruned_during_load(self, tmp_path):
         entry = _make_entry("dm_key", "sid_stale")
-        (tmp_path / "sessions.json").write_text(
-            json.dumps({"dm_key": entry.to_dict()}, indent=2), encoding="utf-8"
-        )
         db = _db_returning({"sid_stale": {"end_reason": "agent_close", "id": "sid_stale"}})
+        db.load_gateway_routing_entries.return_value = {
+            "dm_key": json.dumps(entry.to_dict())
+        }
         config = GatewayConfig(default_reset_policy=SessionResetPolicy(mode="none"))
-        store = SessionStore(sessions_dir=tmp_path, config=config)
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config)
         store._db = db
+        store._loaded = False
 
         store._ensure_loaded()
 
         assert "dm_key" not in store._entries
-

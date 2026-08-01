@@ -113,13 +113,13 @@ class TestVanillaBehaviorUnaffected:
 
 
 # ---------------------------------------------------------------------------
-# Persistence through sessions.json round-trip
+# Persistence through routing-entry round-trip
 # ---------------------------------------------------------------------------
 
 class TestPersistence:
     def test_is_fresh_reset_survives_to_dict_from_dict(self, tmp_path):
         """Protect against the gateway restarting between /reset and the
-        next message — the flag must be persisted in sessions.json.
+        next message — the flag must be persisted in the routing entry.
         """
         store = _make_store(tmp_path)
         source = _make_source()
@@ -130,4 +130,3 @@ class TestPersistence:
         assert new_entry.is_fresh_reset is True
         restored = SessionEntry.from_dict(new_entry.to_dict())
         assert restored.is_fresh_reset is True
-

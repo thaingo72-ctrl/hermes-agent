@@ -2567,7 +2567,7 @@ def resolve_channel_skills(
           - id: "C0123"          # Slack channel ID or Discord channel/forum ID
             skills: ["skill-a", "skill-b"]
           - id: "D0ABCDE"
-            skill: "solo-skill"  # single string also accepted
+            skills: ["solo-skill"]
 
     Prefers an exact match on *channel_id*; falls back to *parent_id*
     (useful for forum threads / Slack threads inheriting the parent channel's
@@ -2591,7 +2591,7 @@ def resolve_channel_skills(
             continue
         entry_id = str(entry.get("id", ""))
         if entry_id in ids_to_check:
-            skills = entry.get("skills") or entry.get("skill")
+            skills = entry.get("skills")
             if isinstance(skills, str):
                 s = skills.strip()
                 return [s] if s else None
@@ -6565,7 +6565,6 @@ class BasePlatformAdapter(ABC):
         chat_id_alt: Optional[str] = None,
         is_bot: bool = False,
         scope_id: Optional[str] = None,
-        guild_id: Optional[str] = None,
         parent_chat_id: Optional[str] = None,
         message_id: Optional[str] = None,
         role_authorized: bool = False,
@@ -6603,7 +6602,6 @@ class BasePlatformAdapter(ABC):
                         chat_id_alt=chat_id_alt,
                         is_bot=is_bot,
                         scope_id=str(scope_id) if scope_id else None,
-                        guild_id=str(guild_id) if guild_id else None,
                         parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
                         message_id=str(message_id) if message_id else None,
                     )
@@ -6627,7 +6625,6 @@ class BasePlatformAdapter(ABC):
             chat_id_alt=chat_id_alt,
             is_bot=is_bot,
             scope_id=str(scope_id) if scope_id else None,
-            guild_id=str(guild_id) if guild_id else None,
             parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
             message_id=str(message_id) if message_id else None,
             profile=profile,

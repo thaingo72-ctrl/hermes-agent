@@ -32,29 +32,34 @@ from tools.skills_hub import (
 
 
 # ---------------------------------------------------------------------------
-# GitHubSource._parse_frontmatter_quick
+# parse_frontmatter
 # ---------------------------------------------------------------------------
 
 
-class TestParseFrontmatterQuick:
+class TestParseFrontmatter:
     def test_valid_frontmatter_including_nested_yaml(self):
+        from agent.skill_utils import parse_frontmatter
+
         content = "---\nname: test-skill\ndescription: A test.\n---\n\n# Body\n"
-        fm = GitHubSource._parse_frontmatter_quick(content)
+        fm, _ = parse_frontmatter(content)
         assert fm["name"] == "test-skill"
         assert fm["description"] == "A test."
 
         nested = "---\nname: test\nmetadata:\n  hermes:\n    tags: [a, b]\n---\n\nBody.\n"
-        assert GitHubSource._parse_frontmatter_quick(nested)["metadata"]["hermes"]["tags"] == ["a", "b"]
+        nested_fm, _ = parse_frontmatter(nested)
+        assert nested_fm["metadata"]["hermes"]["tags"] == ["a", "b"]
 
     def test_degenerate_frontmatter_returns_empty(self):
+        from agent.skill_utils import parse_frontmatter
+
         for content in (
             "# Just a heading\nSome body text.\n",     # no frontmatter at all
             "---\nname: test\nno closing here\n",      # unterminated block
             "",                                         # empty document
-            "---\n: : : invalid{{\n---\n\nBody.\n",     # unparseable YAML
             "---\n- just a list\n- of items\n---\n\nBody.\n",  # non-dict YAML
         ):
-            assert GitHubSource._parse_frontmatter_quick(content) == {}, repr(content)
+            fm, _ = parse_frontmatter(content)
+            assert fm == {}, repr(content)
 
 
 # ---------------------------------------------------------------------------

@@ -234,6 +234,39 @@ class TestJobCRUD:
         )
         assert job["deliver"] == "origin"
 
+    def test_create_persists_only_canonical_skills_list(self, tmp_cron_dir):
+        job = create_job(prompt="Run with skills", schedule="30m", skills=["alpha", "beta"])
+
+        assert job["skills"] == ["alpha", "beta"]
+        assert "skill" not in job
+        saved = load_jobs()
+        assert saved[0]["skills"] == ["alpha", "beta"]
+        assert "skill" not in saved[0]
+
+    def test_load_jobs_ignores_obsolete_singular_skill_field(self, tmp_cron_dir):
+        save_jobs(
+            [
+                {
+                    "id": "legacy-skill",
+                    "name": "legacy-skill",
+                    "prompt": "",
+                    "skill": "obsolete",
+                    "schedule": {"kind": "interval", "minutes": 60},
+                    "enabled": True,
+                    "state": "scheduled",
+                    "next_run_at": None,
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "deliver": "local",
+                }
+            ]
+        )
+
+        job = get_job("legacy-skill")
+
+        assert job is not None
+        assert job["skills"] == []
+        assert "skill" not in job
+
 
 class TestUpdateJob:
     def test_update_name(self, tmp_cron_dir):
@@ -250,6 +283,12 @@ class TestUpdateJob:
         # Verify persisted to disk
         fetched = get_job(job["id"])
         assert fetched["name"] == "New Name"
+
+    def test_update_rejects_removed_singular_skill_field(self, tmp_cron_dir):
+        job = create_job(prompt="Canonical skills", schedule="every 1h")
+
+        with pytest.raises(ValueError, match="canonical 'skills'"):
+            update_job(job["id"], {"skill": "obsolete-alias"})
 
 
 class TestPauseResumeJob:
@@ -1067,5 +1106,4 @@ class TestJobsJsonUtf8Bom:
 
         loaded = load_jobs()
         assert [j["id"] for j in loaded] == ["plainjob01"]
-
 

@@ -30,7 +30,7 @@ def discord_source():
     return SessionSource(
         platform=MagicMock(value="discord"),
         chat_id="123456",
-        guild_id="789",
+        scope_id="789",
         thread_id=None,
         parent_chat_id=None,
     )
@@ -40,13 +40,13 @@ def discord_source():
 def telegram_source():
     """Create a basic Telegram SessionSource for testing.
 
-    Telegram (like Slack/Feishu/etc.) has no ``guild_id`` — only ``chat_id``.
+    Telegram (like Slack/Feishu/etc.) has no guild scope — only ``chat_id``.
     Used to prove profile routing is platform-generic, not Discord-only.
     """
     return SessionSource(
         platform=MagicMock(value="telegram"),
         chat_id="-1001234567890",
-        guild_id=None,
+        scope_id=None,
         thread_id=None,
         parent_chat_id=None,
     )
@@ -227,7 +227,7 @@ class TestAdapterToSessionKeyIntegration:
         adapter = _stub_adapter(Platform.DISCORD, mock_runner)
 
         source = adapter.build_source(
-            chat_id="222", chat_type="group", guild_id="111", user_id="u1",
+            chat_id="222", chat_type="group", scope_id="111", user_id="u1",
         )
         assert source.profile == "coder"
 
@@ -256,5 +256,4 @@ class TestMultiplexGate:
         discord_source.profile = None
 
         assert mock_runner._profile_name_for_source(discord_source) is None
-
 

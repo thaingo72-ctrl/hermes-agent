@@ -1,6 +1,6 @@
 """Tests for SessionStore.prune_old_entries and the gateway watcher that calls it.
 
-The SessionStore in-memory dict (and its backing sessions.json) grew
+The SessionStore in-memory routing dict grew
 unbounded — every unique (platform, chat_id, thread_id, user_id) tuple
 ever seen was kept forever, regardless of how stale it became.  These
 tests pin the prune behaviour:
@@ -9,16 +9,14 @@ tests pin the prune behaviour:
   * Entries marked ``suspended`` are preserved (user-paused)
   * Entries with an active process attached are preserved
   * max_age_days <= 0 disables pruning entirely
-  * sessions.json is rewritten with the post-prune dict
+  * gateway_routing is rewritten with the post-prune dict
   * The ``updated_at`` field — not ``created_at`` — drives the decision
     (so a long-running-but-still-active session isn't pruned)
 """
 
-import json
 import threading
 from datetime import datetime, timedelta
 from unittest.mock import patch
-
 
 from gateway.config import GatewayConfig, Platform, SessionResetPolicy
 from gateway.session import SessionEntry, SessionStore
@@ -35,6 +33,9 @@ def test_session_store_default_db_uses_runtime_hermes_home(tmp_path, monkeypatch
     fake_home = tmp_path / "alt_hermes_home"
     fake_home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_home))
+    import hermes_state
+
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", fake_home / "state.db")
 
     with patch("gateway.session.SessionStore._ensure_loaded"):
         store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
@@ -185,29 +186,30 @@ class TestPruneBasics:
 
 
 class TestPrunePersistsToDisk:
-    def test_prune_rewrites_sessions_json(self, tmp_path):
-        """After prune, sessions.json on disk reflects the new dict."""
+    def test_prune_rewrites_gateway_routing(self, tmp_path, monkeypatch):
+        """After prune, state.db gateway_routing reflects the new dict."""
+        import hermes_state
+
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
         config = GatewayConfig(
             default_reset_policy=SessionResetPolicy(mode="none"),
             session_store_max_age_days=90,
         )
         store = SessionStore(sessions_dir=tmp_path, config=config)
-        store._db = None
         # Force-populate without calling get_or_create to avoid DB side-effects
         store._entries["stale"] = _entry("stale", age_days=500)
         store._entries["fresh"] = _entry("fresh", age_days=1)
         store._loaded = True
         store._save()
 
-        # Verify pre-prune state on disk. Filter out metadata sentinels
-        # (e.g. the "_README" note) so we assert on session keys only.
-        saved_pre = json.loads((tmp_path / "sessions.json").read_text())
-        assert {k for k in saved_pre if not k.startswith("_")} == {"stale", "fresh"}
+        saved_pre = store._db.load_gateway_routing_entries(scope=store._routing_scope())
+        assert set(saved_pre) == {"stale", "fresh"}
 
-        # Prune and check disk.
         store.prune_old_entries(max_age_days=90)
-        saved_post = json.loads((tmp_path / "sessions.json").read_text())
-        assert {k for k in saved_post if not k.startswith("_")} == {"fresh"}
+        saved_post = store._db.load_gateway_routing_entries(scope=store._routing_scope())
+        assert set(saved_post) == {"fresh"}
+        assert not (tmp_path / "sessions.json").exists()
+        store._db.close()
 
 
 class TestGatewayConfigSerialization:
@@ -236,26 +238,3 @@ class TestGatewayWatcherCallsPrune:
 
         should_prune = (now - last_ts) > prune_interval
         assert should_prune is False
-
-
-class TestReadmeSentinel:
-    """The gateway writes a self-documenting ``_README`` key into sessions.json
-    so users who inspect the file directly understand it's the gateway routing
-    index (not the session list). It must never round-trip into a SessionEntry,
-    and real entries must survive a save/load cycle alongside it (#49361)."""
-
-    def test_save_writes_readme_sentinel_first(self, tmp_path):
-        store = _make_store(tmp_path)
-        store._entries["agent:main:whatsapp:dm:99"] = _entry(
-            "agent:main:whatsapp:dm:99", age_days=1
-        )
-        store._save()
-
-        raw = json.loads((tmp_path / "sessions.json").read_text())
-        assert "_README" in raw
-        # Sentinel renders first so it's the first thing a user sees on `cat`.
-        assert next(iter(raw)) == "_README"
-        # The note points users at the real store and command.
-        assert "state.db" in raw["_README"]
-        assert "hermes sessions list" in raw["_README"]
-

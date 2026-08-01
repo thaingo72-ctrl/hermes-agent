@@ -60,13 +60,6 @@ except ImportError:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_sessions_dir() -> Path:
-    """Return the sessions directory using HERMES_HOME."""
-    from hermes_constants import get_hermes_home
-
-    return get_hermes_home() / "sessions"
-
-
 def _get_session_db():
     """Get a SessionDB instance for reading message transcripts."""
     try:
@@ -82,20 +75,16 @@ def _load_sessions_index() -> dict:
 
     Returns a dict of session_key -> entry_dict with platform routing info.
 
-    state.db is the primary source (#9006): gateway sessions persist their
+    state.db is the sole source (#9006): gateway sessions persist their
     routing metadata (session_key, chat/thread ids, display_name, origin) on
-    the durable session row, so a single database read replaces the old
-    dual-file sessions.json dependency.  Falls back to sessions.json for
-    pre-migration databases where no gateway rows carry a session_key yet.
+    the durable session row, so a single database read supplies the routing
+    index.
     """
-    entries = _load_sessions_index_from_db()
-    if entries:
-        return entries
-    return _load_sessions_index_from_json()
+    return _load_sessions_index_from_db()
 
 
 def _row_to_index_entry(row: dict) -> dict:
-    """Convert a state.db gateway session row to the sessions.json entry shape."""
+    """Convert a state.db gateway session row to the MCP routing entry shape."""
     origin = {}
     origin_json = row.get("origin_json")
     if origin_json:
@@ -163,31 +152,6 @@ def _load_sessions_index_from_db() -> dict:
             db.close()
         except Exception:
             pass
-
-
-def _load_sessions_index_from_json() -> dict:
-    """Legacy fallback: load the gateway sessions.json index directly.
-
-    Used only for pre-migration databases whose gateway rows don't carry a
-    session_key yet.  This avoids importing the full SessionStore which
-    needs GatewayConfig.
-    """
-    sessions_file = _get_sessions_dir() / "sessions.json"
-    if not sessions_file.exists():
-        return {}
-    try:
-        with open(sessions_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # Drop documentation/metadata sentinels (keys starting with "_", e.g.
-        # the "_README" note the gateway writes into the index). They are not
-        # session entries and would break consumers that treat every value as
-        # an entry dict.
-        if isinstance(data, dict):
-            return {k: v for k, v in data.items() if not str(k).startswith("_")}
-        return {}
-    except Exception as e:
-        logger.debug("Failed to load sessions.json: %s", e)
-        return {}
 
 
 def _load_channel_directory() -> dict:
@@ -441,8 +405,8 @@ class EventBridge:
         the routing index itself lives in state.db (session rows carry
         session_key/origin metadata), so a new conversation and its first
         message land in the SAME file and one mtime check covers both —
-        eliminating the old dual-file (sessions.json + state.db) race that
-        could drop brand-new conversations (#8925).
+        avoiding split-index races that could drop brand-new conversations
+        (#8925).
         """
         from hermes_constants import get_hermes_home
 

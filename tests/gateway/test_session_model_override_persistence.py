@@ -3,7 +3,7 @@
 ``GatewayRunner._session_model_overrides`` is in-memory, so before persistence
 a gateway restart silently reverted every session to the global default model.
 The non-secret parts (model/provider/base_url) are now written through to the
-session store (``SessionEntry.model_override`` in sessions.json) and lazily
+session store (``SessionEntry.model_override`` in gateway_routing) and lazily
 rehydrated on first use after a restart, with credentials re-resolved through
 the normal runtime provider resolution.
 
@@ -12,16 +12,14 @@ Covers:
     reading the same sessions dir, and a fresh runner rehydrating from it)
   - /new (SessionStore.reset_session) clears the persisted override so a
     restart cannot resurrect it
-  - api_key is NEVER serialized to sessions.json
+  - api_key is NEVER serialized to gateway_routing
 """
-import json
 from unittest.mock import patch
 
 import pytest
 
 from gateway.config import GatewayConfig, Platform
 from gateway.session import (
-    SessionEntry,
     SessionSource,
     SessionStore,
     sanitize_model_override,
@@ -48,25 +46,18 @@ def _make_source() -> SessionSource:
 
 @pytest.fixture
 def store_factory(tmp_path, monkeypatch):
-    """Build SessionStores over a shared sessions dir, without SQLite."""
-
-    def _raise():
-        raise RuntimeError("SQLite disabled in test")
+    """Build SessionStores over a shared isolated state.db."""
 
     import hermes_state
 
-    monkeypatch.setattr(hermes_state, "SessionDB", _raise)
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
 
     def _make() -> SessionStore:
         store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
-        assert store._db is None
+        assert store._db is not None
         return store
 
     return _make
-
-
-def _sessions_json(tmp_path) -> str:
-    return (tmp_path / "sessions.json").read_text(encoding="utf-8")
 
 
 def test_override_persists_and_survives_restart(store_factory, tmp_path):
@@ -84,6 +75,8 @@ def test_override_persists_and_survives_restart(store_factory, tmp_path):
         "provider": "openai",
         "base_url": "https://api.openai.example/v1",
     }
+    store._db.close()
+    store2._db.close()
 
 
 def _make_runner(store):
@@ -122,6 +115,8 @@ def test_runner_rehydrates_override_after_restart(store_factory):
     # Credentials come from live resolution, never from disk.
     assert override["api_key"] == "sk-fresh-from-keychain"
     assert override["api_mode"] == "responses"
+    store._db.close()
+    runner.session_store._db.close()
 
 
 def test_sanitize_model_override():

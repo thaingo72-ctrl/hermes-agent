@@ -42,6 +42,41 @@ def _write_directory(tmp_path, platforms):
     return cache_file
 
 
+def _write_gateway_sessions(tmp_path, sessions_data):
+    """Seed state.db gateway rows used for session-based channel discovery."""
+    from hermes_state import SessionDB
+
+    db_path = tmp_path / "state.db"
+    db = SessionDB(db_path)
+    try:
+        for key, entry in sessions_data.items():
+            origin = entry["origin"]
+            session_id = f"sess_{key}"
+            db.create_session(
+                session_id,
+                origin["platform"],
+                user_id=origin.get("user_id"),
+                session_key=key,
+                chat_id=origin.get("chat_id"),
+                chat_type=entry.get("chat_type"),
+                thread_id=origin.get("thread_id"),
+            )
+            db.record_gateway_session_peer(
+                session_id,
+                source=origin["platform"],
+                user_id=origin.get("user_id"),
+                session_key=key,
+                chat_id=origin.get("chat_id"),
+                chat_type=entry.get("chat_type"),
+                thread_id=origin.get("thread_id"),
+                display_name=origin.get("chat_name") or origin.get("user_name"),
+                origin_json=json.dumps(origin),
+            )
+    finally:
+        db.close()
+    return db_path
+
+
 class TestLoadDirectory:
     def test_missing_file(self, tmp_path):
         with patch("gateway.channel_directory.DIRECTORY_PATH", tmp_path / "nope.json"):
@@ -137,14 +172,8 @@ class TestResolveChannelName:
 
 
 class TestBuildFromSessions:
-    def _write_sessions(self, tmp_path, sessions_data):
-        """Write sessions.json at the path _build_from_sessions expects."""
-        sessions_path = tmp_path / "sessions" / "sessions.json"
-        sessions_path.parent.mkdir(parents=True)
-        sessions_path.write_text(json.dumps(sessions_data))
-
-    def test_builds_from_sessions_json(self, tmp_path):
-        self._write_sessions(tmp_path, {
+    def test_builds_from_state_db_gateway_sessions(self, tmp_path):
+        db_path = _write_gateway_sessions(tmp_path, {
             "session_1": {
                 "origin": {
                     "platform": "telegram",
@@ -169,7 +198,7 @@ class TestBuildFromSessions:
             },
         })
 
-        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+        with patch("hermes_state.DEFAULT_DB_PATH", db_path):
             entries = _build_from_sessions("telegram")
 
         assert len(entries) == 2
@@ -226,13 +255,11 @@ class TestBuildSlack:
     """_build_slack actually calls users.conversations on each workspace client."""
 
     def test_no_team_clients_falls_back_to_sessions(self, tmp_path):
-        sessions_path = tmp_path / "sessions" / "sessions.json"
-        sessions_path.parent.mkdir(parents=True)
-        sessions_path.write_text(json.dumps({
+        db_path = _write_gateway_sessions(tmp_path, {
             "s1": {"origin": {"platform": "slack", "chat_id": "D123", "chat_name": "Alice"}},
-        }))
+        })
 
-        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+        with patch("hermes_state.DEFAULT_DB_PATH", db_path):
             entries = asyncio.run(_build_slack(_make_slack_adapter({})))
 
         assert len(entries) == 1
@@ -249,7 +276,7 @@ class TestBuildSlack:
                 "response_metadata": {},
             },
         ])
-        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+        with patch("hermes_state.DEFAULT_DB_PATH", tmp_path / "state.db"):
             entries = asyncio.run(_build_slack(_make_slack_adapter({"T1": client})))
 
         ids = {e["id"] for e in entries}
@@ -316,4 +343,3 @@ class TestChannelAliases:
         names = [e["name"] for e in on_disk["platforms"]["whatsapp"]
                  if e["id"] == "120363@g.us"]
         assert names == ["general"]
-

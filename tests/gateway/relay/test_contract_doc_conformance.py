@@ -117,10 +117,19 @@ def _session_source_wire_keys() -> set[str]:
         chat_topic="topic",
         user_id_alt="ua",
         chat_id_alt="ca",
-        guild_id="g",
+        scope_id="g",
         parent_chat_id="p",
         message_id="m",
     )
     return set(src.to_dict().keys())
 
+
+def test_session_source_wire_keys_match_contract_doc():
+    """Every emitted SessionSource key is documented in the §3 wire contract."""
+    section = _doc_text().split("## 3.", 1)[-1].split("## 4.", 1)[0]
+    wire_keys = _session_source_wire_keys()
+    missing = {key for key in wire_keys if f"`{key}`" not in section}
+
+    assert not missing, f"SessionSource wire keys missing from §3: {sorted(missing)}"
+    assert "guild_id" not in wire_keys
 

@@ -1255,9 +1255,6 @@ def run_doctor(args):
                 if isinstance(agent_cfg, dict)
                 else None
             )
-            # Legacy root-level key counts too.
-            if cfg_max_turns is None:
-                cfg_max_turns = raw_config.get("max_turns")
             env_ghost = load_env().get("HERMES_MAX_ITERATIONS")
             drift = (
                 cfg_max_turns is not None

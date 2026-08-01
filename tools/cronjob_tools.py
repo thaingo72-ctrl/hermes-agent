@@ -367,9 +367,9 @@ def _repeat_display(job: Dict[str, Any]) -> str:
     return f"{completed}/{times}" if completed else f"{times} times"
 
 
-def _canonical_skills(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
+def _canonical_skills(skills: Optional[Any] = None) -> List[str]:
     if skills is None:
-        raw_items = [skill] if skill else []
+        raw_items = []
     elif isinstance(skills, str):
         raw_items = [skills]
     else:
@@ -536,13 +536,12 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
 
 def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
     prompt = str(job.get("prompt") or "")
-    skills = _canonical_skills(job.get("skill"), job.get("skills"))
+    skills = _canonical_skills(skills=job.get("skills"))
     job_id = str(job.get("id") or "unknown")
     name = str(job.get("name") or prompt[:50] or (skills[0] if skills else "") or job_id or "cron job")
     result = {
         "job_id": job_id,
         "name": name,
-        "skill": skills[0] if skills else None,
         "skills": skills,
         "prompt_preview": prompt[:100] + "..." if len(prompt) > 100 else prompt,
         "model": job.get("model"),
@@ -635,7 +634,6 @@ def cronjob(
     repeat: Optional[int] = None,
     deliver: Optional[str] = None,
     include_disabled: bool = False,
-    skill: Optional[str] = None,
     skills: Optional[List[str]] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
@@ -658,7 +656,7 @@ def cronjob(
         if normalized == "create":
             if not schedule:
                 return tool_error("schedule is required for create", success=False)
-            canonical_skills = _canonical_skills(skill, skills)
+            canonical_skills = _canonical_skills(skills)
             _no_agent = bool(no_agent)
             # Job-shape validation differs by mode:
             #   - no_agent=True → script is the job; prompt/skills are optional
@@ -731,7 +729,6 @@ def cronjob(
                     "success": True,
                     "job_id": job["id"],
                     "name": job["name"],
-                    "skill": job.get("skill"),
                     "skills": job.get("skills", []),
                     "schedule": job["schedule_display"],
                     "repeat": _repeat_display(job),
@@ -841,10 +838,9 @@ def cronjob(
                 updates["name"] = name
             if deliver is not None:
                 updates["deliver"] = _normalize_deliver_param(deliver)
-            if skills is not None or skill is not None:
-                canonical_skills = _canonical_skills(skill, skills)
+            if skills is not None:
+                canonical_skills = _canonical_skills(skills=skills)
                 updates["skills"] = canonical_skills
-                updates["skill"] = canonical_skills[0] if canonical_skills else None
             if model is not None:
                 updates["model"] = _normalize_optional_job_value(model)
             if provider is not None:
@@ -1090,7 +1086,6 @@ registry.register(
         repeat=args.get("repeat"),
         deliver=args.get("deliver"),
         include_disabled=args.get("include_disabled", True),
-        skill=args.get("skill"),
         skills=args.get("skills"),
         # model / provider / base_url are intentionally NOT read from the
         # agent's arguments: per-job inference pins are user-owned (dashboard,

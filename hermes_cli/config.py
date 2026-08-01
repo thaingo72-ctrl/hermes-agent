@@ -2666,8 +2666,8 @@ def _explicit_config_paths(config: Dict[str, Any]) -> Set[Tuple[str, ...]]:
     """Return leaf paths explicitly present in a raw config dict.
 
     Computed on the **raw** (un-normalized, un-expanded) config so that
-    values injected by normalisation (e.g. ``agent.max_turns`` from
-    ``DEFAULT_CONFIG``) are not mistakenly treated as user-set.
+    values injected by normalisation or defaults are not mistakenly treated as
+    user-set.
 
     Used by ``save_config`` to build the *preserve* set passed to
     ``_strip_default_values`` so only user-authored keys survive the
@@ -2816,37 +2816,6 @@ def _normalize_root_model_keys(config: Dict[str, Any]) -> Dict[str, Any]:
         model.pop("model", None)
         model.pop("name", None)
 
-    return config
-
-
-def _normalize_max_turns_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize legacy root-level max_turns into agent.max_turns.
-
-    Only injects the schema default when the user actually set max_turns
-    somewhere (root level or under ``agent``).  A bare ``load_config()``
-    call that passes the result straight to ``save_config()`` should not
-    materialise ``agent.max_turns`` in config.yaml when the user never set
-    it — that makes the default sticky and blocks future schema changes.
-    """
-    config = dict(config)
-    agent_config = dict(config.get("agent") or {})
-
-    had_root = "max_turns" in config
-    had_agent = "max_turns" in agent_config
-
-    if had_root and not had_agent:
-        agent_config["max_turns"] = config["max_turns"]
-
-    # Only inject the default when the user explicitly set max_turns
-    # (either root-level or under agent).  Otherwise leave it absent so
-    # save_config can omit it and the schema default fills in at runtime.
-    if not had_root and not had_agent:
-        pass  # deliberately do not inject DEFAULT_CONFIG default
-    elif "max_turns" not in agent_config:
-        agent_config["max_turns"] = DEFAULT_CONFIG["agent"]["max_turns"]
-
-    config["agent"] = agent_config
-    config.pop("max_turns", None)
     return config
 
 
@@ -3320,13 +3289,6 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                 with open(config_path, encoding="utf-8") as f:
                     user_config = fast_safe_load(f) or {}
 
-                if "max_turns" in user_config:
-                    agent_user_config = dict(user_config.get("agent") or {})
-                    if agent_user_config.get("max_turns") is None:
-                        agent_user_config["max_turns"] = user_config["max_turns"]
-                    user_config["agent"] = agent_user_config
-                    user_config.pop("max_turns", None)
-
                 config = _deep_merge(config, user_config)
             except Exception as e:
                 # Last-known-good fallback (port of openai/codex#31188's
@@ -3369,7 +3331,8 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                         )
                     return copy.deepcopy(lkg_copy) if want_deepcopy else lkg_copy
 
-        normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
+        normalized = _normalize_root_model_keys(config)
+        normalized.pop("max_turns", None)
         expanded = _expand_env_vars(normalized)
         # Managed scope wins at the leaf. Applied AFTER user expansion so a user
         # ${VAR} cannot shadow a managed literal: managed values are expanded only
@@ -3532,9 +3495,8 @@ def save_config(
         config_path = get_config_path()
         require_readable_config_before_write(config_path)
         # Compute explicit user paths BEFORE any normalisation --------
-        # _normalize_max_turns_config may inject agent.max_turns from
-        # DEFAULT_CONFIG; using the raw dict preserves which paths the
-        # user actually set so _strip_default_values can keep them.
+        # using the raw dict preserves which paths the user actually set so
+        # _strip_default_values can keep them.
         _raw_for_paths = read_raw_config()
         explicit_raw_paths: Optional[Set[Tuple[str, ...]]] = (
             _explicit_config_paths(_raw_for_paths) if _raw_for_paths else None
@@ -3543,13 +3505,15 @@ def save_config(
             config = _merge_partial_save(_raw_for_paths, config)
         # ----------------------------------------------------------------
 
-        current_normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
+        current_normalized = _normalize_root_model_keys(config)
+        current_normalized.pop("max_turns", None)
         normalized = current_normalized
         raw_existing = (
-            _normalize_root_model_keys(_normalize_max_turns_config(_raw_for_paths))
+            _normalize_root_model_keys(_raw_for_paths)
             if _raw_for_paths
             else {}
         )
+        raw_existing.pop("max_turns", None)
         if raw_existing:
             normalized = _preserve_env_ref_templates(
                 normalized,

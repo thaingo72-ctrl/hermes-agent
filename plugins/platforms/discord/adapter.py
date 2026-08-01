@@ -7612,7 +7612,7 @@ class DiscordAdapter(BasePlatformAdapter):
             thread_id=thread_id,
             chat_topic=chat_topic,
             is_bot=getattr(message.author, "bot", False),
-            guild_id=str(guild.id) if guild else None,
+            scope_id=str(guild.id) if guild else None,
             parent_chat_id=parent_channel_id,
             message_id=str(message.id),
             role_authorized=role_authorized,

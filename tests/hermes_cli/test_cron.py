@@ -24,7 +24,7 @@ class TestCronCommandLifecycle:
         job = create_job(
             prompt="Combine skill outputs",
             schedule="every 1h",
-            skill="blogwatcher",
+            skills=["blogwatcher"],
         )
 
         cron_command(
@@ -73,7 +73,7 @@ class TestCronCommandLifecycle:
         )
         cleared = get_job(job["id"])
         assert cleared["skills"] == []
-        assert cleared["skill"] is None
+        assert "skill" not in cleared
 
         out = capsys.readouterr().out
         assert "Updated job" in out

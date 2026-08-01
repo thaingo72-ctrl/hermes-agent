@@ -2912,8 +2912,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         ``display_name`` / ``origin_json`` carry the gateway's presentation
         and full origin metadata (#9006) so consumers (mcp_serve, mirror,
-        channel directory) can read routing data from state.db instead of
-        sessions.json.  They are COALESCE'd only in the sense that ``None``
+        channel directory) read routing data from state.db. They are
+        COALESCE'd only in the sense that ``None``
         leaves the existing value untouched.
 
         ``include_compression_ancestors`` keeps a logical compression lineage
@@ -2981,8 +2981,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
     def set_expiry_finalized(self, session_id: str, finalized: bool = True) -> None:
         """Mark a gateway session's expiry-finalization flag in state.db.
 
-        Mirrors ``SessionEntry.expiry_finalized`` (sessions.json) so the flag
-        survives even if the JSON index is pruned or lost (#9006).
+        Persists the gateway expiry-finalization flag on the durable session
+        row (#9006).
         """
         if not session_id:
             return
@@ -2995,19 +2995,18 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
 
         self._execute_write(_do)
 
-    # ── Gateway routing index (replaces sessions.json, #9006 follow-up) ────
+    # ── Gateway routing index (#9006 follow-up) ────────────────────────────
 
     def save_gateway_routing_entry(
         self, session_key: str, entry_json: str, *, scope: str = ""
     ) -> None:
         """Upsert one gateway routing entry (session_key -> SessionEntry JSON).
 
-        The gateway_routing table is the durable replacement for
-        sessions.json: one row per routing key, holding the full serialized
+        The gateway_routing table stores one row per routing key, holding the
+        full serialized
         ``SessionEntry`` so the gateway can rehydrate exactly what it wrote.
 
-        ``scope`` namespaces the index the way separate sessions.json files
-        did (one per sessions_dir) — callers pass their sessions_dir path so
+        ``scope`` namespaces the index by sessions_dir path so
         two stores with different directories never share routing state.
         """
         if not session_key or not entry_json:
@@ -3030,10 +3029,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
     ) -> None:
         """Atomically replace the routing index for *scope* with *entries*.
 
-        Mirrors the sessions.json full-rewrite semantics: keys absent from
-        *entries* are removed (pruned/reset sessions disappear from the
-        index).  Runs as a single write transaction.  Other scopes are
-        untouched.
+        Keys absent from *entries* are removed (pruned/reset sessions
+        disappear from the index). Runs as a single write transaction. Other
+        scopes are untouched.
         """
         now = time.time()
 
@@ -3080,9 +3078,8 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
     ) -> List[Dict[str, Any]]:
         """List gateway sessions (rows with a session_key) from state.db.
 
-        Returns the newest row per session_key — the same shape consumers got
-        from sessions.json: one live mapping per routing key.  ``platform``
-        filters on ``source``; ``active_only`` restricts to sessions that
+        Returns the newest row per session_key: one live mapping per routing
+        key. ``platform`` filters on ``source``; ``active_only`` restricts to sessions that
         have not ended.
         """
         # Full rows carry token/cost totals (MCP listings, /status) — drain
@@ -3123,8 +3120,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
     ) -> Optional[str]:
         """Find the most recent live session_id for a platform + chat origin.
 
-        Equivalent of gateway/mirror's sessions.json scan: matches on
-        source + chat_id (+ thread_id when provided).  When ``user_id`` is
+        Matches on source + chat_id (+ thread_id when provided). When ``user_id`` is
         provided, exact sender matches are preferred; if multiple distinct
         users share the chat and none matches, returns None rather than
         contaminating another participant's session.
@@ -3175,10 +3171,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
     ) -> Optional[Dict[str, Any]]:
         """Find the latest recoverable gateway session for a routing peer.
 
-        ``sessions.json`` is the fast routing index, but it can be missing or
-        pruned after process-level restart bugs.  New gateway sessions persist
-        the deterministic ``session_key`` on the durable session row so the
-        mapping can be rebuilt exactly.  Rows ended only by older gateway
+        Gateway sessions persist the deterministic ``session_key`` on the
+        durable session row so routing peers can be recovered exactly. Rows
+        ended only by older gateway
         cleanup's ``agent_close`` bug or a mistaken TUI ``ws_orphan_reap``
         (dashboard viewer disconnect before #60609) are treated as recoverable;
         explicit conversation boundaries such as /new, /resume switches, and

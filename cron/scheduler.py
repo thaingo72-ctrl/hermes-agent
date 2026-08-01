@@ -2049,7 +2049,22 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
                 try:
                     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                     try:
-                        future = pool.submit(asyncio.run, _send_to_platform(platform, pconfig, chat_id, cleaned_delivery_content, thread_id=thread_id, media_files=media_files))
+                        # Construct the coroutine inside the worker. If submit()
+                        # itself fails (for example during interpreter shutdown),
+                        # no un-awaited coroutine object is leaked.
+                        def _run_send_in_fresh_loop():
+                            return asyncio.run(
+                                _send_to_platform(
+                                    platform,
+                                    pconfig,
+                                    chat_id,
+                                    cleaned_delivery_content,
+                                    thread_id=thread_id,
+                                    media_files=media_files,
+                                )
+                            )
+
+                        future = pool.submit(_run_send_in_fresh_loop)
                         result = future.result(timeout=30)
                     finally:
                         pool.shutdown(wait=False)
@@ -2543,8 +2558,7 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     )
     prompt = cron_hint + prompt
     if skills is None:
-        legacy = job.get("skill")
-        skills = [legacy] if legacy else []
+        skills = []
     elif isinstance(skills, str):
         skills = [skills]
 
@@ -3260,7 +3274,11 @@ def run_job(
                     prefill_messages = None
 
         # Max iterations
-        max_iterations = _cfg.get("agent", {}).get("max_turns") or _cfg.get("max_turns") or 500
+        agent_config = _cfg.get("agent")
+        if isinstance(agent_config, dict):
+            max_iterations = agent_config.get("max_turns") or 500
+        else:
+            max_iterations = 500
 
         # Provider routing
         pr = _cfg.get("provider_routing") or {}

@@ -450,8 +450,7 @@ def _restore_cron_skill_links(snapshot_dir: Path) -> Dict[str, Any]:
         report["error"] = "backed-up cron-jobs.json has no jobs list"
         return report
 
-    # Build a lookup of the backed-up skill state keyed by job id.
-    # We only need the two skill-ish fields (legacy single and modern list).
+    # Build a lookup of the canonical backed-up skill list keyed by job id.
     backup_by_id: Dict[str, Dict[str, Any]] = {}
     for job in backup_jobs:
         if not isinstance(job, dict):
@@ -461,7 +460,6 @@ def _restore_cron_skill_links(snapshot_dir: Path) -> Dict[str, Any]:
             continue
         backup_by_id[jid] = {
             "skills": job.get("skills"),
-            "skill": job.get("skill"),
             "name": job.get("name") or jid,
         }
 
@@ -496,11 +494,9 @@ def _restore_cron_skill_links(snapshot_dir: Path) -> Dict[str, Any]:
                     continue  # live job didn't exist at snapshot time
 
                 cur_skills = live.get("skills")
-                cur_skill = live.get("skill")
                 bkp_skills = backup.get("skills")
-                bkp_skill = backup.get("skill")
 
-                if cur_skills == bkp_skills and cur_skill == bkp_skill:
+                if cur_skills == bkp_skills:
                     report["unchanged"] += 1
                     continue
 
@@ -510,16 +506,12 @@ def _restore_cron_skill_links(snapshot_dir: Path) -> Dict[str, Any]:
                     live.pop("skills", None)
                 else:
                     live["skills"] = bkp_skills
-                if bkp_skill is None:
-                    live.pop("skill", None)
-                else:
-                    live["skill"] = bkp_skill
 
                 report["restored"].append({
                     "job_id": jid,
                     "job_name": backup.get("name") or jid,
-                    "from": {"skills": cur_skills, "skill": cur_skill},
-                    "to": {"skills": bkp_skills, "skill": bkp_skill},
+                    "from": {"skills": cur_skills},
+                    "to": {"skills": bkp_skills},
                 })
                 changed = True
 

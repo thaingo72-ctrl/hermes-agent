@@ -36,10 +36,10 @@ class TestSlackResolveChannelSkills:
         })
         assert _resolve(adapter, "D0BBB") is None
 
-    def test_single_skill_string(self):
+    def test_single_skill_list(self):
         adapter = _make_adapter({
             "channel_skill_bindings": [
-                {"id": "D0ATH9TQ0G6", "skill": "german-flashcards"},
+                {"id": "D0ATH9TQ0G6", "skills": ["german-flashcards"]},
             ]
         })
         assert _resolve(adapter, "D0ATH9TQ0G6") == ["german-flashcards"]

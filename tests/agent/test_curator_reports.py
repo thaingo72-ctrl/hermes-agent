@@ -181,7 +181,7 @@ def test_curator_rewrites_cron_skills_when_skill_consolidated(curator_env_with_c
     # Cron job is rewritten on disk
     loaded = jobs.get_job(job["id"])
     assert loaded["skills"] == ["foo-umbrella"]
-    assert loaded["skill"] == "foo-umbrella"
+    assert "skill" not in loaded
 
     # Rewrite is recorded in run.json
     payload = json.loads((run_dir / "run.json").read_text())
@@ -202,7 +202,6 @@ def test_curator_rewrites_cron_skills_when_skill_consolidated(curator_env_with_c
     assert "Cron job skill references rewritten" in md
     assert "foo-watcher" in md
     assert "foo-umbrella" in md
-
 
 
 

@@ -1467,7 +1467,7 @@ def _get_cute_tool_message(
     if tool_name == "cronjob":
         action = args.get("action", "?")
         if action == "create":
-            skills = args.get("skills") or ([] if not args.get("skill") else [args.get("skill")])
+            skills = args.get("skills") or []
             label = args.get("name") or (skills[0] if skills else None) or args.get("prompt", "task")
             return _wrap(f"┊ ⏰ cron      create {_trunc(label, 24)}  {dur}")
         if action == "list":

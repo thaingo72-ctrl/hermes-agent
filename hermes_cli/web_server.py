@@ -11315,7 +11315,7 @@ def _normalize_dashboard_cron_script(value: Any, profile_home: Path) -> Optional
 def _validate_dashboard_cron_effective_job(job: Dict[str, Any]) -> None:
     prompt = _cron_optional_text(job.get("prompt"))
     script = _cron_optional_text(job.get("script"))
-    skills = _cron_string_list(job.get("skills")) or _cron_string_list(job.get("skill"))
+    skills = _cron_string_list(job.get("skills"))
     no_agent = bool(job.get("no_agent"))
 
     if no_agent:
@@ -11642,11 +11642,9 @@ def _update_cron_job_sync(job_id: str, body: CronJobUpdate, profile: Optional[st
                 updates.get("context_from"),
                 profile_name,
             )
-        execution_fields = {"prompt", "skill", "skills", "script", "no_agent"}
+        execution_fields = {"prompt", "skills", "script", "no_agent"}
         if execution_fields.intersection(updates):
             effective = {**existing, **updates}
-            if "skills" in updates and "skill" not in updates:
-                effective["skill"] = None
             _validate_dashboard_cron_effective_job(effective)
         job = _call_cron_for_profile(profile_name, "update_job", job_id, updates)
     except HTTPException:

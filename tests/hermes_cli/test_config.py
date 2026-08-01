@@ -14,7 +14,6 @@ from hermes_cli.config import (
     ensure_hermes_home,
     get_compatible_custom_providers,
     _explicit_config_paths,
-    _normalize_max_turns_config,
     is_provider_enabled,
     load_config,
     load_env,
@@ -76,13 +75,13 @@ class TestLoadConfigDefaults:
             assert config["terminal"]["backend"] == "local"
             assert config["display"]["interim_assistant_messages"] is True
 
-    def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
+    def test_root_level_max_turns_is_ignored(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             config_path = tmp_path / "config.yaml"
             config_path.write_text("max_turns: 42\n")
 
             config = load_config()
-            assert config["agent"]["max_turns"] == 42
+            assert config["agent"]["max_turns"] == DEFAULT_CONFIG["agent"]["max_turns"]
             assert "max_turns" not in config
 
 
@@ -1324,11 +1323,18 @@ class TestConfigNormalizationDoesNotOverwriteUserValues:
 
 
 
-    def test_normalize_max_turns_does_not_inject_default(self):
-        result = _normalize_max_turns_config(
-            {"_config_version": DEFAULT_CONFIG["_config_version"]}
+    def test_root_max_turns_does_not_override_agent_max_turns(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "_config_version: 31\nmax_turns: 7\nagent:\n  max_turns: 11\n",
+            encoding="utf-8",
         )
-        assert "max_turns" not in result.get("agent", {})
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            loaded = load_config()
+
+        assert loaded["agent"]["max_turns"] == 11
+        assert "max_turns" not in loaded
 
 
 

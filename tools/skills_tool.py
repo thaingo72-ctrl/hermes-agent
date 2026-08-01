@@ -83,6 +83,7 @@ from utils import env_var_enabled
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS,
     is_skill_support_path as _is_skill_support_path,
+    parse_frontmatter,
 )
 
 logger = logging.getLogger(__name__)
@@ -549,16 +550,6 @@ def check_skills_requirements() -> bool:
     return True
 
 
-def _parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
-    """Parse YAML frontmatter from markdown content.
-
-    Delegates to ``agent.skill_utils.parse_frontmatter`` — kept here
-    as a public re-export so existing callers don't need updating.
-    """
-    from agent.skill_utils import parse_frontmatter
-    return parse_frontmatter(content)
-
-
 def _get_category_from_path(skill_path: Path) -> Optional[str]:
     """
     Extract category from skill path based on directory structure.
@@ -726,7 +717,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
 
             try:
                 content = skill_md.read_text(encoding="utf-8")[:4000]
-                frontmatter, body = _parse_frontmatter(content)
+                frontmatter, body = parse_frontmatter(content)
 
                 if not skill_matches_platform(frontmatter):
                     continue
@@ -887,7 +878,7 @@ def _serve_plugin_skill(
 
     parsed_frontmatter: Dict[str, Any] = {}
     try:
-        parsed_frontmatter, _ = _parse_frontmatter(content)
+        parsed_frontmatter, _ = parse_frontmatter(content)
     except Exception:
         pass
 
@@ -1163,7 +1154,7 @@ def skill_view(
                     continue
                 try:
                     fm_content = found_skill_md.read_text(encoding="utf-8")
-                    fm, _ = _parse_frontmatter(fm_content)
+                    fm, _ = parse_frontmatter(fm_content)
                 except Exception:
                     fm = {}
                 if fm.get("name") == name:
@@ -1261,7 +1252,7 @@ def skill_view(
 
         parsed_frontmatter: Dict[str, Any] = {}
         try:
-            parsed_frontmatter, _ = _parse_frontmatter(content)
+            parsed_frontmatter, _ = parse_frontmatter(content)
         except Exception:
             parsed_frontmatter = {}
 

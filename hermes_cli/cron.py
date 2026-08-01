@@ -26,11 +26,9 @@ from cron.lifecycle_guard import (  # noqa: F401  (re-exported for terminal_tool
 )
 
 
-def _normalize_skills(single_skill=None, skills: Optional[Iterable[str]] = None) -> Optional[List[str]]:
+def _normalize_skills(skills: Optional[Iterable[str]] = None) -> Optional[List[str]]:
     if skills is None:
-        if single_skill is None:
-            return None
-        raw_items = [single_skill]
+        return None
     else:
         raw_items = list(skills)
 
@@ -137,7 +135,7 @@ def cron_list(show_all: bool = False):
             deliver = [deliver]
         deliver_str = ", ".join(deliver)
 
-        skills = job.get("skills") or ([job["skill"]] if job.get("skill") else [])
+        skills = job.get("skills") or []
         if state == "paused":
             status = color("[paused]", Colors.YELLOW)
         elif state == "completed":
@@ -345,8 +343,7 @@ def cron_create(args):
         name=getattr(args, "name", None),
         deliver=getattr(args, "deliver", None),
         repeat=getattr(args, "repeat", None),
-        skill=getattr(args, "skill", None),
-        skills=_normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None)),
+        skills=_normalize_skills(getattr(args, "skills", None)),
         script=getattr(args, "script", None),
         workdir=getattr(args, "workdir", None),
         model=getattr(args, "model", None),
@@ -387,10 +384,10 @@ def cron_edit(args):
         print(color(f"Job not found: {args.job_id}", Colors.RED))
         return 1
 
-    existing_skills = list(job.get("skills") or ([] if not job.get("skill") else [job.get("skill")]))
-    replacement_skills = _normalize_skills(getattr(args, "skill", None), getattr(args, "skills", None))
-    add_skills = _normalize_skills(None, getattr(args, "add_skills", None)) or []
-    remove_skills = set(_normalize_skills(None, getattr(args, "remove_skills", None)) or [])
+    existing_skills = list(job.get("skills") or [])
+    replacement_skills = _normalize_skills(getattr(args, "skills", None))
+    add_skills = _normalize_skills(getattr(args, "add_skills", None)) or []
+    remove_skills = set(_normalize_skills(getattr(args, "remove_skills", None)) or [])
 
     final_skills = None
     if getattr(args, "clear_skills", False):

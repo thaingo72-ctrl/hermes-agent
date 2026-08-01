@@ -554,7 +554,7 @@ group_sessions_per_user: false
 |------|------|-------------|
 | SQLite 数据库 | `~/.hermes/state.db` | 所有 session 元数据 + 带 FTS5 的消息 |
 | Gateway 消息 | `~/.hermes/state.db` | SQLite——所有 session 消息的权威存储 |
-| Gateway 路由索引 | `~/.hermes/sessions/sessions.json` | 将 session 键映射到活跃 session ID（来源元数据、过期标志） |
+| Gateway 路由索引 | `~/.hermes/state.db` | `gateway_routing` 表将 session 键映射到活跃 session ID（来源元数据、过期标志） |
 
 SQLite 数据库使用 WAL 模式支持并发读取和单写入，非常适合 gateway 的多平台架构。
 

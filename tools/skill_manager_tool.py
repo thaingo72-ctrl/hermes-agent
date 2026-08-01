@@ -46,7 +46,7 @@ from hermes_cli.config import cfg_get
 from agent.skill_utils import (
     extract_skill_description,
     is_skill_description_truncated_for_prompt,
-    parse_frontmatter as _parse_frontmatter,
+    parse_frontmatter,
     SKILL_PROMPT_DESC_LIMIT,
 )
 
@@ -896,7 +896,7 @@ def _resolve_skill_target(skill_dir: Path, file_path: str) -> Tuple[Optional[Pat
 
 def _add_description_prompt_preview(result: Dict[str, Any], content: str) -> None:
     """Append a system_prompt_preview field when the description will be truncated."""
-    fm, _ = _parse_frontmatter(content)
+    fm, _ = parse_frontmatter(content)
     if is_skill_description_truncated_for_prompt(fm):
         result["system_prompt_preview"] = (
             f"System prompt will show: \"{extract_skill_description(fm)}\" — "

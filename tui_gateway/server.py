@@ -5658,7 +5658,7 @@ def _cfg_max_turns(cfg: dict, default: int) -> int:
     except (TypeError, ValueError):
         pass
     agent_cfg = cfg.get("agent") or {}
-    return int(agent_cfg.get("max_turns") or cfg.get("max_turns") or default)
+    return int(agent_cfg.get("max_turns") or default)
 
 
 def _parse_tui_skills_env() -> list[str]:

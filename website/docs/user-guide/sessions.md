@@ -668,25 +668,17 @@ Sessions with **active background processes** are never auto-reset, regardless o
 | SQLite database | `~/.hermes/state.db` | All session metadata + messages with FTS5 |
 | Gateway messages    | `~/.hermes/state.db`   | SQLite — canonical store for all session messages |
 | Gateway routing index | `gateway_routing` table in `~/.hermes/state.db` | Maps session keys to active session IDs (origin metadata, expiry flags) |
-| Legacy routing mirror | `~/.hermes/sessions/sessions.json` | Backward-compat mirror of the routing index, written when `gateway.write_sessions_json: true` (the default) |
 
 The SQLite database uses WAL mode for concurrent readers and a single writer, which suits the gateway's multi-platform architecture well.
 
-:::warning `sessions.json` is not the session list
-The gateway routing index lives in the `gateway_routing` table inside
-`state.db`; `~/.hermes/sessions/sessions.json` is a **legacy mirror** of it,
-kept for backward compatibility (disable with
-`gateway.write_sessions_json: false`). It maps messaging session keys
-(`agent:main:<platform>:...`) to active session IDs.
-It only ever contains gateway/messaging entries, so if you run a messaging
-platform you'll see only those (e.g. `agent:main:whatsapp:dm:...`).
+:::note Old routing mirrors
+Older installations may retain `~/.hermes/sessions/sessions.json`. Current
+Hermes neither reads nor writes that file; all CLI, TUI, and gateway routing
+lives in `state.db`. After backing up and verifying `state.db`, the stale file
+can be removed. `/save` snapshots under `~/.hermes/sessions/saved/*.json` are
+convenience exports, not a routing index.
 
-This is **expected** and does **not** mean your CLI sessions are missing.
-`hermes sessions list`, `/sessions`, and the dashboard all read `state.db`,
-which holds **every** session (CLI, TUI, and gateway). The `/save` snapshots
-under `~/.hermes/sessions/saved/*.json` are convenience exports, not the index.
-
-If CLI sessions genuinely don't appear in `hermes sessions list`, the cause is
+If sessions don't appear in `hermes sessions list`, the cause is
 `state.db` not receiving them — run `hermes sessions repair` and watch for a
 `⚠ Session store unavailable` warning at CLI startup, which means SQLite
 persistence failed for that run.

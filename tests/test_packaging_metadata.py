@@ -56,6 +56,22 @@ def test_faster_whisper_is_not_a_base_dependency():
     assert any(dep.startswith("faster-whisper") for dep in voice_extra)
 
 
+def test_obsolete_compatibility_extras_are_removed_from_metadata():
+    data = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    extras = data["project"]["optional-dependencies"]
+
+    obsolete = {"cron", "vision", "pty", "nemo-relay"}
+    assert obsolete.isdisjoint(extras)
+
+    references = {
+        spec
+        for specs in extras.values()
+        for spec in specs
+        if any(f"hermes-agent[{name}]" in spec for name in obsolete)
+    }
+    assert references == set()
+
+
 # Minimum non-vulnerable Starlette: CVE-2026-48710 ("BadHost") was fixed in
 # 1.0.1. Anything below that lets a malformed Host header desync
 # ``request.url.path`` from the dispatched ASGI path, bypassing path-based

@@ -40,7 +40,7 @@ incoming `MessageEvent` and used for routing, isolation, and context injection.
 | `user_id_alt` | `Optional[str]` | `None` | Platform-specific stable alternative ID (Signal UUID, Feishu union_id). Used when `user_id` is ephemeral. |
 | `chat_id_alt` | `Optional[str]` | `None` | Signal group internal ID — maps a Signal group V2 identifier to its canonical form. |
 | `is_bot` | `bool` | `False` | True when the message author is a bot or webhook (Discord bots). |
-| `guild_id` | `Optional[str]` | `None` | Discord guild / Slack workspace / Matrix server scope identifier. |
+| `scope_id` | `Optional[str]` | `None` | Platform-neutral scope identifier: Discord guild, Slack workspace, or Matrix server. |
 | `parent_chat_id` | `Optional[str]` | `None` | Parent channel when `chat_id` refers to a thread. |
 | `message_id` | `Optional[str]` | `None` | ID of the triggering message. Used for pin/reply/react operations and Discord ID injection. |
 | `role_authorized` | `bool` | `False` | True when adapter granted access via a platform role (not individual user ID). |
@@ -49,14 +49,14 @@ incoming `MessageEvent` and used for routing, isolation, and context injection.
 
 - **`description`** (property: `str`) — Human-readable summary e.g. `"DM with Alice"`,
   `"group: My Group, thread: 12345"`.
-- **`to_dict()` / `from_dict()`** — Serialization round-trip for persistence in `sessions.json`.
+- **`to_dict()` / `from_dict()`** — Serialization round-trip for persistence in `state.db` `gateway_routing`.
 
 ---
 
 ## 2. SessionEntry — Active Session Record
 
 `SessionEntry` is the per-session metadata record stored in memory and persisted to
-`{sessions_dir}/sessions.json`. Each entry maps a `session_key` to its current `session_id`.
+the `gateway_routing` table in `state.db`. Each entry maps a `session_key` to its current `session_id`.
 
 ### Fields
 
@@ -144,7 +144,7 @@ behavior on the next access.
 ## 3. SessionStore — Storage and Operations
 
 `SessionStore` is the main storage layer. It maintains an in-memory dict (`_entries`) persisted
-to `sessions.json`, with SQLite (`SessionDB`) as the canonical store for session metadata and
+to `state.db` `gateway_routing`, with SQLite (`SessionDB`) also storing session metadata and
 message transcripts.
 
 ### Constructor
@@ -153,7 +153,7 @@ message transcripts.
 SessionStore(sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=None)
 ```
 
-- `sessions_dir` — Directory where `sessions.json` lives.
+- `sessions_dir` — Namespace component for this store's `gateway_routing` rows.
 - `config` — `GatewayConfig` instance for reset policy lookups.
 - `has_active_processes_fn` — Optional callback keyed by `session_key` to check for running
   background processes. Sessions with active processes are never expired or pruned.
@@ -181,8 +181,8 @@ SessionStore(sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=
 
 ### Internal Helpers
 
-- `_ensure_loaded()` / `_ensure_loaded_locked()` — Load `sessions.json` into `_entries` dict.
-- `_save()` — Atomic write to `sessions.json` via temp file + `atomic_replace`.
+- `_ensure_loaded()` / `_ensure_loaded_locked()` — Load `gateway_routing` rows into `_entries` dict.
+- `_save()` — Persist the routing snapshot to `state.db`.
 - `_generate_session_key(source)` — Delegates to `build_session_key()` with config params.
 - `_is_session_expired(entry)` — Policy check from entry alone (no source needed). Used by
   background expiry watcher.
@@ -191,16 +191,14 @@ SessionStore(sessions_dir: Path, config: GatewayConfig, has_active_processes_fn=
 ### Storage Layout
 
 ```
-{sessions_dir}/
-  sessions.json          # In-memory _entries dict, persisted as JSON
-                           Maps session_key → SessionEntry (metadata only)
+state.db
+  gateway_routing        # Maps session_key → serialized SessionEntry by scope
   {session_id}.jsonl     # (Legacy, removed in spec 002)
 ```
 
 The canonical transcript store is SQLite via `SessionDB` (from `hermes_state`). The
-`sessions.json` file persists the `session_key → session_id` mapping and entry metadata
-(flags, timestamps, token counts). If SQLite is unavailable, the store falls back to
-JSONL, but this is a degradation path.
+`gateway_routing` table persists the `session_key → session_id` mapping and entry metadata
+(flags, timestamps, token counts).
 
 ---
 
@@ -548,7 +546,7 @@ The `_session_expiry_watcher` task runs in the gateway event loop every 300 seco
    - Clean up cached AIAgent resources (close tool resources, shut down memory provider).
    - Evict the cached agent entry.
    - Clear per-session overrides (`_session_model_overrides`, reasoning overrides, etc.).
-   - Mark `expiry_finalized=True` and persist (sessions.json + state.db).
+   - Mark `expiry_finalized=True` and persist to state.db.
    - Promote the state.db session row to `end_reason='session_reset'` via
      `promote_to_session_reset()` — conditional: only live rows or rows ended with a
      recoverable accidental reason (`agent_close`, `ws_orphan_reap`) are promoted, so
@@ -561,7 +559,7 @@ The `_session_expiry_watcher` task runs in the gateway event loop every 300 seco
    reset policy. This prevents unbounded memory growth in gateways with long-lived sessions.
 
 3. **Prune stale entries** — Calls `session_store.prune_old_entries()` hourly based on
-   `config.session_store_max_age_days`. Prevents `sessions.json` from growing unbounded.
+   `config.session_store_max_age_days`. Prevents gateway routing rows from growing unbounded.
 
 ### Failure Handling
 

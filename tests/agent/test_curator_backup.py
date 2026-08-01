@@ -341,14 +341,14 @@ def test_restore_cron_skill_links_standalone(backup_env):
     backups_dir.mkdir(parents=True)
     (backups_dir / cb.CRON_JOBS_FILENAME).write_text(json.dumps([
         {"id": "job-1", "name": "one", "skills": ["narrow-a", "narrow-b"]},
-        {"id": "job-2", "name": "two", "skill": "legacy-single"},
+        {"id": "job-2", "name": "two", "skills": ["unchanged"]},
         {"id": "job-gone", "name": "deleted", "skills": ["whatever"]},
     ]), encoding="utf-8")
 
     # Live jobs: job-1 got rewritten, job-2 unchanged, job-gone deleted
     _write_cron_jobs(home, [
         {"id": "job-1", "name": "one", "skills": ["umbrella"], "schedule": "every 1h"},
-        {"id": "job-2", "name": "two", "skill": "legacy-single", "schedule": "every 1h"},
+        {"id": "job-2", "name": "two", "skills": ["unchanged"], "schedule": "every 1h"},
         {"id": "job-new", "name": "new", "skills": ["x"], "schedule": "every 1h"},
     ])
     _reload_cron_jobs(home)

@@ -3039,7 +3039,7 @@ class MatrixAdapter(BasePlatformAdapter):
             user_name=display_name,
             thread_id=thread_id,
             chat_topic=identity.room_topic,
-            guild_id=identity.server_name,
+            scope_id=identity.server_name,
             parent_chat_id=room_id if thread_id else None,
             message_id=event_id,
         )

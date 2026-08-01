@@ -605,14 +605,6 @@ def load_cli_config() -> Dict[str, Any]:
                 if key not in defaults and key != "model":
                     defaults[key] = file_config[key]
             
-            # Handle legacy root-level max_turns (backwards compat) - copy to
-            # agent.max_turns whenever the nested key is missing.
-            agent_file_config = file_config.get("agent")
-            if "max_turns" in file_config and not (
-                isinstance(agent_file_config, dict)
-                and agent_file_config.get("max_turns") is not None
-            ):
-                defaults["agent"]["max_turns"] = file_config["max_turns"]
         except Exception as e:
             logger.warning("Failed to load cli-config.yaml: %s", e)
 
@@ -4426,14 +4418,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self.max_turns = max_turns
         elif CLI_CONFIG["agent"].get("max_turns"):
             self.max_turns = CLI_CONFIG["agent"]["max_turns"]
-        elif CLI_CONFIG.get("max_turns"):  # Backwards compat: root-level max_turns
-            # KEEP (evaluated for the v12 support-floor cleanup, July 2026):
-            # no versioned config migration ever rewrote root-level max_turns
-            # to agent.max_turns on disk — only load-time normalization
-            # (_normalize_max_turns_config) folds it, and configs read through
-            # other paths may bypass it. This fallback is therefore the only
-            # safety net for configs that still carry the root key.
-            self.max_turns = CLI_CONFIG["max_turns"]
         elif os.getenv("HERMES_MAX_ITERATIONS"):
             try:
                 self.max_turns = int(os.getenv("HERMES_MAX_ITERATIONS", ""))

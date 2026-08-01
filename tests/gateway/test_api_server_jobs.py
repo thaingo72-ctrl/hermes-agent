@@ -212,6 +212,22 @@ class TestUpdateJob:
                 assert "evil_field" not in sanitized
                 assert "__proto__" not in sanitized
 
+    @pytest.mark.asyncio
+    async def test_update_job_rejects_removed_singular_skill_field(self, adapter):
+        app = _create_app(adapter)
+        mock_update = MagicMock()
+        async with TestClient(TestServer(app)) as cli:
+            with patch(f"{_MOD}._CRON_AVAILABLE", True), patch(
+                f"{_MOD}._cron_update", mock_update
+            ):
+                resp = await cli.patch(
+                    f"/api/jobs/{VALID_JOB_ID}",
+                    json={"skill": "obsolete-alias"},
+                )
+
+        assert resp.status == 400
+        mock_update.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # 13. test_delete_job

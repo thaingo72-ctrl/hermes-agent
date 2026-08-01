@@ -9,11 +9,9 @@ module-level constants live in hermes_state_common.
 """
 
 import logging
-import json
 import sqlite3
 from typing import Dict, Optional
 
-from hermes_constants import get_hermes_home
 from hermes_state_common import (
     DEFERRED_INDEX_SQL,
     FTS_SQL,
@@ -235,8 +233,8 @@ class SessionSchemaMixin:
           exists under a different scope — the exact isolation the composite
           key exists to provide.
 
-        Each failed save logs a warning and falls back to sessions.json,
-        so a legacy-shaped table produces endless per-save warning spam.
+        Each failed save logs a warning, so a legacy-shaped table produces
+        endless per-save warning spam.
         Rebuild it once, preserving rows.  On a session_key collision across
         scopes (possible while the PK was wrong) the newest row wins.
         """
@@ -569,19 +567,6 @@ class SessionSchemaMixin:
                     )
                 except sqlite3.OperationalError:
                     pass
-            if current_version < 18:
-                # v18: gateway metadata consolidation (#9006). Backfill
-                # display_name / origin_json / expiry_finalized from
-                # sessions.json so pre-migration gateway sessions are
-                # discoverable from state.db without the JSON index.
-                try:
-                    self._backfill_gateway_metadata_from_sessions_json(cursor)
-                except Exception as exc:
-                    # Backfill is best-effort: sessions.json may be absent,
-                    # corrupted, or partially stale. Missing metadata simply
-                    # means consumers fall back to sessions.json for those
-                    # rows until the gateway rewrites them.
-                    logger.debug("v18 gateway metadata backfill skipped: %s", exc)
             if current_version < 20:
                 # v20: per-model usage attribution (issue #51607). Going
                 # forward update_token_counts() records each API call into
@@ -854,52 +839,3 @@ class SessionSchemaMixin:
                     self._ensure_fts_cjk_schema(cursor)
 
         self._conn.commit()
-
-    def _backfill_gateway_metadata_from_sessions_json(
-        self, cursor: sqlite3.Cursor
-    ) -> None:
-        """One-time v18 backfill of gateway metadata from sessions.json.
-
-        Existing gateway sessions predate the display_name / origin_json /
-        expiry_finalized columns; copy what sessions.json knows so consumers
-        can switch to state.db without losing pre-migration sessions.
-        Only fills NULL columns — never overwrites data written by newer code.
-        """
-        sessions_file = get_hermes_home() / "sessions" / "sessions.json"
-        if not sessions_file.exists():
-            return
-        with open(sessions_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return
-        for key, entry in data.items():
-            if str(key).startswith("_") or not isinstance(entry, dict):
-                continue
-            session_id = entry.get("session_id")
-            if not session_id:
-                continue
-            origin = entry.get("origin")
-            cursor.execute(
-                """UPDATE sessions
-                   SET session_key = COALESCE(session_key, ?),
-                       chat_id = COALESCE(chat_id, ?),
-                       chat_type = COALESCE(chat_type, ?),
-                       thread_id = COALESCE(thread_id, ?),
-                       display_name = COALESCE(display_name, ?),
-                       origin_json = COALESCE(origin_json, ?),
-                       expiry_finalized = CASE
-                           WHEN COALESCE(expiry_finalized, 0) = 0 AND ? = 1 THEN 1
-                           ELSE expiry_finalized
-                       END
-                   WHERE id = ?""",
-                (
-                    entry.get("session_key") or key,
-                    (origin or {}).get("chat_id") if isinstance(origin, dict) else None,
-                    entry.get("chat_type"),
-                    (origin or {}).get("thread_id") if isinstance(origin, dict) else None,
-                    entry.get("display_name"),
-                    json.dumps(origin) if isinstance(origin, dict) else None,
-                    1 if entry.get("expiry_finalized") or entry.get("memory_flushed") else 0,
-                    str(session_id),
-                ),
-            )

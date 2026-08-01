@@ -1597,7 +1597,7 @@ class CLICommandsMixin:
             replacement_skills = _normalize_skills(opts["skills"])
             add_skills = _normalize_skills(opts["add_skills"])
             remove_skills = set(_normalize_skills(opts["remove_skills"]))
-            existing_skills = list(existing.get("skills") or ([] if not existing.get("skill") else [existing.get("skill")]))
+            existing_skills = list(existing.get("skills") or [])
             if opts["clear_skills"]:
                 final_skills = []
             elif replacement_skills:
