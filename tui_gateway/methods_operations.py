@@ -1,7 +1,7 @@
 """Operational JSON-RPC handlers for the TUI gateway.
 
 This module owns stateful operator commands that used to live in the legacy
-``methods_tools`` rebinding seam. Dependencies are explicit and frozen so each
+server.py's rebinding seam. Dependencies are explicit and frozen so each
 handler can be tested without mutating imported state.
 """
 

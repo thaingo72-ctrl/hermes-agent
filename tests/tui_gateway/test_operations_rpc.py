@@ -5,7 +5,7 @@ import threading
 import time
 import types
 
-from tui_gateway import methods_operations, methods_tools, server
+from tui_gateway import methods_operations, server
 
 
 def _session(agent=None, **extra):
@@ -43,45 +43,6 @@ def test_operation_handlers_are_registered_from_operations_module():
         assert isinstance(registered, functools.partial)
         assert registered.func is handler
         assert "services" in registered.keywords
-
-
-def test_legacy_tools_module_no_longer_registers_operation_handlers():
-    legacy_names = {name for name, _handler in methods_tools._registry._pending}
-
-    assert not legacy_names & {
-        "slash.exec",
-        "insights.get",
-        "rollback.list",
-        "rollback.restore",
-        "rollback.diff",
-        "shell.exec",
-        "system.battery",
-        "process.stop",
-        "process.list",
-        "process.kill",
-        "reload.mcp",
-        "reload.env",
-        "commands.catalog",
-        "cli.exec",
-        "command.resolve",
-        "command.dispatch",
-        "browser.manage",
-        "plugins.list",
-        "plugins.manage",
-        "config.show",
-        "tools.list",
-        "tools.show",
-        "tools.configure",
-        "toolsets.list",
-        "agents.list",
-        "cron.manage",
-        "learning.frames",
-        "learning.detail",
-        "learning.delete",
-        "learning.edit",
-        "skills.manage",
-        "skills.reload",
-    }
 
 
 def test_rollback_restore_is_serialized_per_session():

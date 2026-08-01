@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import threading
 
-import tui_gateway.methods_tools as methods_tools
 import tui_gateway.server as srv
 
 
@@ -29,13 +28,6 @@ MANAGEMENT_METHODS = {
 def test_management_handlers_are_registered_from_canonical_module():
     for name in MANAGEMENT_METHODS:
         assert srv._methods[name].__module__ == "tui_gateway.methods_management"
-
-
-def test_extracted_management_handlers_are_not_registered_by_legacy_tools_module():
-    legacy_names = {name for name, _handler in methods_tools._registry._pending}
-
-    assert MANAGEMENT_METHODS.isdisjoint(legacy_names)
-    assert "shell.exec" not in legacy_names
 
 
 def test_concurrent_management_requests_keep_response_state_isolated(monkeypatch):

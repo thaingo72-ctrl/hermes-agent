@@ -11231,13 +11231,14 @@ def _browser_disconnect(rid) -> dict:
 
 
 # ── Split JSON-RPC handler modules ───────────────────────────────────
-# Billing, config, completion, prompt, session_lifecycle, and system register
-# direct service-injected callables. The remaining split modules still use
-# method_ctx.py's legacy rebinding seam.
+# Billing, config, completion, delegation, management, operations, pet, prompt,
+# session_lifecycle, session_meta, and system register direct service-injected
+# callables. methods_session still uses method_ctx.py's legacy rebinding seam.
 from . import (  # noqa: E402
     methods_billing as _methods_billing,
     methods_complete as _methods_complete,
     methods_config as _methods_config,
+    methods_delegation as _methods_delegation,
     methods_management as _methods_management,
     methods_operations as _methods_operations,
     methods_prompt as _methods_prompt,
@@ -11245,7 +11246,6 @@ from . import (  # noqa: E402
     methods_session_lifecycle as _methods_session_lifecycle,
     methods_session_meta as _methods_session_meta,
     methods_system as _methods_system,
-    methods_tools as _methods_tools,
 )
 from . import methods_pet  # noqa: E402
 
@@ -11600,13 +11600,22 @@ methods_pet.register(
     services=_pet_services,
     profile_scoped=_profile_scoped,
 )
+_methods_delegation.register(
+    _methods,
+    services=_methods_delegation.default_delegation_tool_services(
+        sess_nowait=_sess_nowait,
+        current_transport=current_transport,
+        stdio_transport=_stdio_transport,
+        enqueue_prompt=_enqueue_prompt,
+        record_inflight_correction=_record_inflight_correction,
+        spawn_trees_root=_spawn_trees_root,
+        spawn_tree_session_dir=_spawn_tree_session_dir,
+        append_spawn_tree_index=_append_spawn_tree_index,
+        read_spawn_tree_index=_read_spawn_tree_index,
+    ),
+)
 
-for _m in (
-    _methods_session,
-    _methods_tools,
-):
-    _m.register(sys.modules[__name__])
-del _m
+_methods_session.register(sys.modules[__name__])
 
 _methods_session_meta.register(
     _methods,
