@@ -22,6 +22,7 @@ import pytest
 
 import tools.file_tools as ft
 import tools.terminal_tool as terminal_tool
+import agent.runtime_cwd as rc
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ def _isolated_cwd(tmp_path, monkeypatch):
     # the worktree.
     monkeypatch.chdir(decoy)
     # No session cwd recorded yet (fresh-session condition).
-    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+    monkeypatch.setattr(rc, "_SESSION_CWDS", {})
     return workspace, decoy
 
 
@@ -72,7 +73,7 @@ def test_live_tracking_cwd_wins_over_relative_terminal_cwd(_isolated_cwd, monkey
     """
     workspace, decoy = _isolated_cwd
     monkeypatch.setenv("TERMINAL_CWD", ".")
-    terminal_tool.record_session_cwd("default", str(workspace))
+    rc.record_session_cwd("default", str(workspace))
 
     resolved = ft._resolve_path_for_task("target.py", task_id="default")
 
@@ -126,7 +127,7 @@ def test_container_relative_path_keeps_container_cwd_symlink(tmp_path, monkeypat
     container_mount.symlink_to(host_project, target_is_directory=True)
     monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: {"env_type": "docker"})
     monkeypatch.setattr(terminal_tool, "_active_environments", {})
-    terminal_tool.record_session_cwd("default", str(container_mount))
+    rc.record_session_cwd("default", str(container_mount))
 
     resolved = ft._resolve_path_for_task("oilsands-sim/README.md", task_id="default")
 
@@ -134,25 +135,47 @@ def test_container_relative_path_keeps_container_cwd_symlink(tmp_path, monkeypat
     assert resolved != host_project / "oilsands-sim" / "README.md"
 
 
-def test_ssh_first_file_operation_resolves_on_remote_posix_cwd(monkeypatch):
-    """First SSH file op must not run host Path.resolve() on remote paths."""
-    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+def test_ssh_first_file_operation_creates_remote_context_before_resolution(monkeypatch):
+    """Fresh SSH path resolution must use detected remote home/cwd."""
+    monkeypatch.setattr(rc, "_SESSION_CWDS", {})
     monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
     monkeypatch.setattr(terminal_tool, "_resolve_container_task_id", lambda task_id: task_id or "default")
-    monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: {"env_type": "ssh"})
+    monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: {
+        "env_type": "ssh",
+        "cwd": "~/project",
+        "timeout": 60,
+        "ssh_host": "example.invalid",
+        "ssh_user": "alice",
+        "ssh_port": 22,
+        "ssh_key": "",
+        "ssh_persistent": False,
+    })
+    monkeypatch.setenv("TERMINAL_CWD", "/host/not/remote")
 
     class FakeSSHEnvironment:
         cwd = "~/project"
-        _remote_home = "/home/remote"
+        _remote_home = "/home/alice"
 
-    monkeypatch.setattr(terminal_tool, "_active_environments", {"ssh-sess": FakeSSHEnvironment()})
+    created = []
+
+    def create_environment(**kwargs):
+        created.append(kwargs["cwd"])
+        return FakeSSHEnvironment()
+
+    monkeypatch.setattr(terminal_tool, "_active_environments", {})
+    monkeypatch.setattr(terminal_tool, "_create_environment", create_environment)
+    monkeypatch.setattr(terminal_tool, "_last_activity", {})
+    monkeypatch.setattr(terminal_tool, "_creation_locks", {})
+    monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
     monkeypatch.setattr(ft, "_file_ops_cache", {})
 
+    ft._ensure_remote_path_context("ssh-sess")
     resolved_relative = ft._resolve_path_for_task("src/app.py", task_id="ssh-sess")
     resolved_tilde = ft._resolve_path_for_task("~/notes.txt", task_id="ssh-sess")
 
-    assert resolved_relative == PurePosixPath("/home/remote/project/src/app.py")
-    assert resolved_tilde == PurePosixPath("/home/remote/notes.txt")
+    assert created == ["~/project"]
+    assert resolved_relative == PurePosixPath("/home/alice/project/src/app.py")
+    assert resolved_tilde == PurePosixPath("/home/alice/notes.txt")
 
 
 class _DummyDockerEnvironment:
@@ -180,7 +203,7 @@ def test_warning_fires_when_relative_path_escapes_workspace(_isolated_cwd, monke
     # Live cwd = workspace, but the relative path resolves to decoy (process cwd)
     # because TERMINAL_CWD is the poison '.'.  Simulate by recording workspace
     # as the session cwd while the resolved path is under decoy.
-    terminal_tool.record_session_cwd("default", str(workspace))
+    rc.record_session_cwd("default", str(workspace))
     resolved_in_decoy = decoy / "target.py"
 
     warn = ft._path_resolution_warning("target.py", resolved_in_decoy, task_id="default")
@@ -209,7 +232,7 @@ def test_warning_fires_from_terminal_cwd_when_registry_empty(_isolated_cwd, monk
     worktree is flagged on the very first write.
     """
     workspace, decoy = _isolated_cwd
-    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+    monkeypatch.setattr(rc, "_SESSION_CWDS", {})
     monkeypatch.setenv("TERMINAL_CWD", str(workspace))
 
     # Relative path that escapes the worktree into the decoy/main checkout.
@@ -245,12 +268,11 @@ def _two_worktree_sessions(tmp_path, monkeypatch):
     monkeypatch.chdir(main)
     monkeypatch.delenv("TERMINAL_CWD", raising=False)
     monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
-    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+    monkeypatch.setattr(rc, "_SESSION_CWDS", {})
     monkeypatch.setattr(ft, "_file_ops_cache", {})
-    # Both sessions register their worktree cwd (TUI/desktop registration path;
-    # registration seeds each session's record).
-    terminal_tool.register_task_env_overrides("sess-a", {"cwd": str(wt_a)})
-    terminal_tool.register_task_env_overrides("sess-b", {"cwd": str(wt_b)})
+    # TUI/desktop session boundary records each worktree cwd directly.
+    rc.record_session_cwd("sess-a", str(wt_a))
+    rc.record_session_cwd("sess-b", str(wt_b))
     # Session B ran the last command; the shared env's live cwd is wt_b but
     # only B's RECORD carries it.
     monkeypatch.setattr(

@@ -83,12 +83,13 @@ def resolve_bang_cwd(session_key: Optional[str] = None) -> Optional[str]:
 
     Mirrors the terminal tool's resolution order so ``!pwd`` matches where the
     agent's own commands land: the session's recorded ``cd`` state first
-    (``terminal_tool.get_session_cwd``, updated after every agent command),
+            (``agent.runtime_cwd.get_session_cwd``, updated after every agent command),
     then the configured ``TERMINAL_CWD``/backend default. ``None`` means "let
     the subprocess inherit the process cwd".
     """
     try:
-        from tools.terminal_tool import _get_env_config, get_session_cwd
+        from agent.runtime_cwd import get_session_cwd
+        from tools.terminal_tool import _get_env_config
 
         recorded = get_session_cwd(session_key)
         if recorded:
@@ -209,4 +210,3 @@ def run_bang_command(
             pass
 
     return int(proc.returncode or 0)
-

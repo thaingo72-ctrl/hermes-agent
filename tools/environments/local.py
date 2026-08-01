@@ -1572,7 +1572,7 @@ class LocalEnvironment(BaseEnvironment):
             except Exception:
                 pass
 
-    def _update_cwd(self, result: dict):
+    def _update_cwd(self, result: dict) -> str | None:
         """Update cwd from the stdout marker emitted by the wrapped command.
 
         The base command wrapper already appends ``pwd -P`` to stdout inside a
@@ -1581,9 +1581,9 @@ class LocalEnvironment(BaseEnvironment):
         ``_extract_cwd_from_output`` keeps the local Windows normalization and
         stale-path rollback semantics intact.
         """
-        self._extract_cwd_from_output(result)
+        return self._extract_cwd_from_output(result)
 
-    def _extract_cwd_from_output(self, result: dict):
+    def _extract_cwd_from_output(self, result: dict) -> str | None:
         """Same semantics as the base class, but on Windows the value
         emitted by ``pwd -P`` inside Git Bash is in MSYS form
         (``/c/Users/x``). Normalize to native Windows form and validate
@@ -1597,15 +1597,18 @@ class LocalEnvironment(BaseEnvironment):
         # Snapshot pre-existing cwd, defer to base for parsing + marker
         # stripping, then validate / normalize whatever it assigned.
         prev_cwd = self.cwd
-        super()._extract_cwd_from_output(result)
+        parsed_cwd = super()._extract_cwd_from_output(result)
         if self.cwd != prev_cwd:
             normalized = _msys_to_windows_path(self.cwd) if _IS_WINDOWS else self.cwd
             if normalized and os.path.isdir(normalized):
                 self.cwd = normalized
+                return normalized
             else:
                 # Stale / non-existent path — keep previous cwd; _run_bash
                 # will resolve a safe fallback on the next call if needed.
                 self.cwd = prev_cwd
+                return None
+        return parsed_cwd
 
     def cleanup(self):
         """Clean up temp files."""

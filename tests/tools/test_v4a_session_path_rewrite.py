@@ -4,12 +4,13 @@ import pytest
 
 import tools.file_tools as ft
 import tools.terminal_tool as tt
+import agent.runtime_cwd as rc
 from tools.file_operations import PatchResult
 
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
-    monkeypatch.setattr(tt, "_session_cwd", {})
+    monkeypatch.setattr(rc, "_SESSION_CWDS", {})
     monkeypatch.setattr(tt, "_task_env_overrides", {})
     monkeypatch.setattr(ft, "_file_ops_cache", {})
 
@@ -33,10 +34,12 @@ def two_sessions(tmp_path, monkeypatch):
         (wt / "delete.txt").write_text("bye\n")
         (wt / "move-src.txt").write_text("move\n")
     monkeypatch.chdir(tmp_path)
-    tt.record_session_cwd("sess-a", str(wt_a))
-    tt.record_session_cwd("sess-b", str(wt_b))
+    rc.record_session_cwd("sess-a", str(wt_a))
+    rc.record_session_cwd("sess-b", str(wt_b))
     monkeypatch.setattr(ft, "_check_sensitive_path", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ft, "_check_sensitive_resolved_path", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(ft, "_check_cross_profile_path", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ft, "_check_cross_profile_resolved_path", lambda *_args, **_kwargs: None)
     return wt_a, wt_b
 
 
@@ -135,3 +138,60 @@ def test_v4a_rewrite_keeps_two_shared_backend_sessions_in_their_worktrees(
     assert f"{wt_b / 'move-src.txt'} -> {wt_b / 'move-dst.txt'}" in patches["sess-b"]
     assert str(wt_b) not in patches["sess-a"]
     assert str(wt_a) not in patches["sess-b"]
+
+
+@pytest.mark.parametrize(
+    ("patch_text", "expected"),
+    [
+        (
+            """*** Begin Patch
+*** Update File: update.txt
+@@
+-old
++new
+*** End Patch
+""",
+            ("*** Update File: {root}/update.txt",),
+        ),
+        (
+            """*** Begin Patch
+*** Add File: add.txt
++hello
+*** End Patch
+""",
+            ("*** Add File: {root}/add.txt",),
+        ),
+        (
+            """*** Begin Patch
+*** Delete File: delete.txt
+*** End Patch
+""",
+            ("*** Delete File: {root}/delete.txt",),
+        ),
+        (
+            """*** Begin Patch
+*** Move File: move-src.txt -> move-dst.txt
+*** End Patch
+""",
+            ("*** Move File: {root}/move-src.txt -> {root}/move-dst.txt",),
+        ),
+    ],
+)
+def test_v4a_apply_uses_pre_get_file_ops_resolution_snapshot(
+    two_sessions, monkeypatch, patch_text, expected
+):
+    wt_a, wt_b = two_sessions
+    ops = RecordingPatchOps()
+
+    def get_ops(_task_id: str):
+        rc.record_session_cwd("sess-a", str(wt_b))
+        return ops
+
+    monkeypatch.setattr(ft, "_get_file_ops", get_ops)
+
+    result = json.loads(ft.patch_tool(mode="patch", patch=patch_text, task_id="sess-a"))
+
+    assert result["success"] is True
+    for header in expected:
+        assert header.format(root=wt_a) in ops.patch
+        assert header.format(root=wt_b) not in ops.patch

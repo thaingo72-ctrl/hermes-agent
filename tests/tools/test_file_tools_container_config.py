@@ -1,6 +1,7 @@
 """Tests for docker container_config key propagation in file_tools."""
 
 from unittest.mock import patch, MagicMock
+import agent.runtime_cwd as rc
 import tools.file_tools as file_tools
 
 
@@ -55,13 +56,15 @@ class TestFileToolsContainerConfig:
         assert cc.get("docker_mount_cwd_to_workspace") is True
 
 
-    def test_cwd_only_raw_task_override_reaches_file_environment(self):
-        """CWD-only task overrides collapse to default but must keep their cwd."""
+    def test_runtime_record_reaches_collapsed_file_environment(self):
+        """CWD records are keyed by session even when env key collapses."""
+        rc.record_session_cwd("desktop-session-cwd", "/workspace/session")
         captured = self._run(
             _make_env_config(env_type="local", cwd="/config-cwd"),
             "desktop-session-cwd",
-            task_env_overrides={"desktop-session-cwd": {"cwd": "/workspace/session"}},
+            task_env_overrides={},
         )
 
         assert captured["task_id"] == "default"
         assert captured["cwd"] == "/workspace/session"
+        rc.clear_session_cwd("desktop-session-cwd")

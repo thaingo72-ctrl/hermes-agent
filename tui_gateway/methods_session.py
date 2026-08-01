@@ -833,6 +833,9 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 5036, f"delete failed: {e}")
         if not deleted:
             return _err(rid, 4007, "session not found")
+        from tools.terminal_tool import teardown_session_runtime_cwd
+
+        teardown_session_runtime_cwd(target)
         return _ok(rid, {"deleted": target})
 
 

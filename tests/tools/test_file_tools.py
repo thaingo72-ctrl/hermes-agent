@@ -9,6 +9,7 @@ import logging
 import os
 from unittest.mock import MagicMock, patch
 
+import agent.runtime_cwd as rc
 from tools.file_tools import (
     PATCH_SCHEMA,
 )
@@ -334,7 +335,7 @@ class TestWindowsMsysPathResolution:
 
         monkeypatch.setattr(file_tools.sys, "platform", "win32")
         monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
-        monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default": True)
+        monkeypatch.setattr(file_tools, "_terminal_env_type_for_task", lambda task_id="default": "docker")
         monkeypatch.setattr(
             file_tools,
             "_authoritative_workspace_root",
@@ -540,7 +541,7 @@ class TestSessionCwdSurvivesEnvRecreation:
         task_id = "default"
         # The session's record holds the directory (written by the last
         # completed terminal command before the env was cleaned up).
-        tt.record_session_cwd(task_id, "/Users/user/project")
+        rc.record_session_cwd(task_id, "/Users/user/project")
         try:
             _get_file_ops(task_id)
 
@@ -556,7 +557,7 @@ class TestSessionCwdSurvivesEnvRecreation:
             assert cwd_passed == "/Users/user/project", \
                 f"Expected cwd='/Users/user/project', got {cwd_passed!r}"
         finally:
-            tt.clear_session_cwd(task_id)
+            rc.clear_session_cwd(task_id)
 
 
     @patch("tools.terminal_tool._active_environments", new_callable=dict)
@@ -573,7 +574,7 @@ class TestSessionCwdSurvivesEnvRecreation:
         from tools.file_tools import _get_file_ops
 
         task_id = "default"
-        tt.clear_session_cwd(task_id)
+        rc.clear_session_cwd(task_id)
 
         # Stale cache entry: env was cleaned up, cache still holds the old cwd.
         cached = MagicMock()
@@ -606,7 +607,7 @@ class TestSessionCwdSurvivesEnvRecreation:
             assert cwd_passed == "/Users/user/project", \
                 f"Expected restored cwd='/Users/user/project', got {cwd_passed!r}"
         finally:
-            tt.clear_session_cwd(task_id)
+            rc.clear_session_cwd(task_id)
 
 
 class TestSilentFileMisplacementE2E:
@@ -637,13 +638,13 @@ class TestSilentFileMisplacementE2E:
         )
 
         task_id = "default"
-        tt.clear_session_cwd(task_id)
+        rc.clear_session_cwd(task_id)
 
         # 1) Env alive; agent has cd'd into the project (the completed command
         #    recorded the session cwd — simulate that write here).
         fo = ft._get_file_ops(task_id)
         fo.env.cwd = str(project)
-        tt.record_session_cwd(task_id, str(project))
+        rc.record_session_cwd(task_id, str(project))
         ft.write_file_tool("alive.txt", "1\n", task_id)
         assert (project / "alive.txt").exists()
 
@@ -661,4 +662,4 @@ class TestSilentFileMisplacementE2E:
         assert not (config_default / "report.txt").exists(), \
             "file silently misplaced into config default (the #26211 bug)"
 
-        tt.clear_session_cwd(task_id)
+        rc.clear_session_cwd(task_id)

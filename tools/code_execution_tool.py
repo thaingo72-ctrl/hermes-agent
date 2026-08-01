@@ -764,7 +764,10 @@ def _get_or_create_env(task_id: str):
         else:
             image = ""
 
-        cwd = overrides.get("cwd") or config["cwd"]
+        from agent.runtime_cwd import get_session_cwd, initialize_session_cwd
+
+        initialize_session_cwd(task_id, config["cwd"])
+        cwd = get_session_cwd(task_id) or config["cwd"]
 
         container_config = None
         if env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}:
@@ -1827,39 +1830,20 @@ def _resolve_child_cwd(mode: str, staging_dir: str, task_id: str = "") -> str:
     """Resolve the working directory for the execute_code subprocess.
 
     - ``strict``: the staging tmpdir (today's behavior).
-    - ``project``: the session's own cwd — its per-session cwd record
-      (written after every completed terminal command), then the raw
-      per-session cwd override registered via ``session.cwd.set`` /
-      ``register_task_env_overrides``, then the session's TERMINAL_CWD
-      (same as the terminal tool), or ``os.getcwd()`` if none points at a
-      real dir. Falls back to the staging tmpdir as a last resort so we
-      never invoke Popen with a nonexistent cwd.
-
-    This mirrors the resolution ladder file tools and the terminal use
-    (record → registered override → TERMINAL_CWD), so all file-writing
-    paths within a session agree on the working directory. (#56047)
+    - ``project``: the session's authoritative runtime CWD record when it
+      names a real directory, otherwise the ambient launch cwd.
     """
     if mode != "project":
         return staging_dir
     if task_id:
-        # 1. The session's cwd record — IS the session's `cd` state.
         try:
-            from tools.terminal_tool import get_session_cwd
+            from agent.runtime_cwd import get_session_cwd
 
             recorded = get_session_cwd(task_id)
         except Exception:
             recorded = None
         if recorded and os.path.isdir(recorded):
             return recorded
-        # 2. Registered workspace override (session.cwd.set → gateway/TUI/ACP).
-        try:
-            from tools.file_tools import _registered_task_cwd_override
-
-            session_cwd = _registered_task_cwd_override(task_id)
-        except Exception:
-            session_cwd = None
-        if session_cwd and os.path.isdir(session_cwd):
-            return session_cwd
     raw = os.environ.get("TERMINAL_CWD", "").strip()
     if raw:
         expanded = os.path.expanduser(raw)

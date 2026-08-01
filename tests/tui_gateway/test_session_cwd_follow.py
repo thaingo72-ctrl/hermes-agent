@@ -13,6 +13,7 @@ import subprocess
 
 import pytest
 
+import agent.runtime_cwd as rc
 import tools.terminal_tool as terminal_tool
 import tui_gateway.server as server
 
@@ -47,9 +48,9 @@ def repo_with_worktree(tmp_path):
 def session(repo_with_worktree):
     repo, _ = repo_with_worktree
     key = "sess-follow"
-    terminal_tool.clear_session_cwd(key)
+    rc.clear_session_cwd(key)
     yield {"session_key": key, "cwd": str(repo), "source": "desktop"}
-    terminal_tool.clear_session_cwd(key)
+    rc.clear_session_cwd(key)
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +64,7 @@ def _no_db(monkeypatch):
 def test_settling_in_a_worktree_reanchors_the_session(session, repo_with_worktree):
     """The whole reported bug: work goes to the worktree, the session says main."""
     _, worktree = repo_with_worktree
-    terminal_tool.record_session_cwd(session["session_key"], str(worktree))
+    rc.record_session_cwd(session["session_key"], str(worktree))
 
     assert server._reconcile_session_cwd_from_terminal(session) is True
     assert session["cwd"] == str(worktree)
@@ -75,7 +76,7 @@ def test_a_subdirectory_of_the_same_checkout_is_not_a_move(session, repo_with_wo
     repo, _ = repo_with_worktree
     sub = repo / "src"
     sub.mkdir()
-    terminal_tool.record_session_cwd(session["session_key"], str(sub))
+    rc.record_session_cwd(session["session_key"], str(sub))
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
     assert session["cwd"] == str(repo)
@@ -86,7 +87,7 @@ def test_browsing_outside_a_repo_is_not_a_move(session, repo_with_worktree, tmp_
     repo, _ = repo_with_worktree
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    terminal_tool.record_session_cwd(session["session_key"], str(scratch))
+    rc.record_session_cwd(session["session_key"], str(scratch))
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
     assert session["cwd"] == str(repo)
@@ -96,7 +97,7 @@ def test_remote_backends_do_not_reanchor(session, repo_with_worktree, monkeypatc
     """A remote cwd names a path on the host, not one this gateway can probe."""
     repo, worktree = repo_with_worktree
     monkeypatch.setattr(server, "_is_local_terminal_backend", lambda: False)
-    terminal_tool.record_session_cwd(session["session_key"], str(worktree))
+    rc.record_session_cwd(session["session_key"], str(worktree))
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
     assert session["cwd"] == str(repo)
@@ -109,7 +110,7 @@ def test_settled_session_info_reports_the_worktree_branch(
     _, worktree = repo_with_worktree
     emitted: list[tuple[str, str, dict]] = []
     monkeypatch.setattr(server, "_emit", lambda ev, sid, payload=None: emitted.append((ev, sid, payload or {})))
-    terminal_tool.record_session_cwd(session["session_key"], str(worktree))
+    rc.record_session_cwd(session["session_key"], str(worktree))
 
     server._emit_settled_session_info("sid-1", session, agent=None)
 
@@ -123,17 +124,17 @@ def test_settled_session_info_reports_the_worktree_branch(
 def test_reconcile_ignores_a_foreign_sessions_record(session, repo_with_worktree):
     """cwd records are per session key — another chat's move must not leak in."""
     repo, worktree = repo_with_worktree
-    terminal_tool.record_session_cwd("someone-else", str(worktree))
+    rc.record_session_cwd("someone-else", str(worktree))
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
     assert session["cwd"] == str(repo)
-    terminal_tool.clear_session_cwd("someone-else")
+    rc.clear_session_cwd("someone-else")
 
 
 def test_os_normalized_paths_are_not_a_move(session, repo_with_worktree):
     """A trailing-slash / unnormalized record is the same dir, not a relocation."""
     repo, _ = repo_with_worktree
-    terminal_tool.record_session_cwd(session["session_key"], str(repo) + os.sep)
+    rc.record_session_cwd(session["session_key"], str(repo) + os.sep)
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
 
@@ -147,26 +148,37 @@ def test_explicit_cwd_switch_cleans_old_environment_before_recording_new(
     new.mkdir()
     session = {"session_key": "sess-switch", "cwd": str(old), "source": "desktop"}
     events: list[tuple[str, str]] = []
+    cleaned: list[str] = []
+
+    class FakeEnv:
+        def cleanup(self):
+            cleaned.append("default")
 
     monkeypatch.setattr(server, "_get_db", lambda: None)
     monkeypatch.setattr(server, "_persist_session_git_meta", lambda *_a: None)
+    monkeypatch.setattr(terminal_tool, "_active_environments", {"default": FakeEnv()})
+    monkeypatch.setattr(terminal_tool, "_last_activity", {"default": 1.0})
+    monkeypatch.setattr(terminal_tool, "_creation_locks", {"default": object()})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
 
-    def cleanup(task_id: str) -> None:
-        events.append(("cleanup", task_id))
-        assert terminal_tool.get_session_cwd(task_id) == str(old)
+    import tools.file_tools as ft
+
+    monkeypatch.setattr(ft, "_file_ops_cache", {"default": object()})
 
     def register(updated_session: dict) -> None:
         events.append(("register", updated_session["session_key"]))
+        assert "default" not in terminal_tool._active_environments
+        assert "default" not in ft._file_ops_cache
         assert updated_session["cwd"] == str(new.resolve())
-        terminal_tool.record_session_cwd(
+        rc.record_session_cwd(
             updated_session["session_key"], updated_session["cwd"]
         )
 
-    terminal_tool.record_session_cwd("sess-switch", str(old))
+    rc.record_session_cwd("sess-switch", str(old))
     monkeypatch.setattr(server, "_register_session_cwd", register)
-    monkeypatch.setattr(terminal_tool, "cleanup_vm", cleanup)
 
     assert server._set_session_cwd(session, str(new)) == str(new.resolve())
 
-    assert events == [("cleanup", "sess-switch"), ("register", "sess-switch")]
-    assert terminal_tool.get_session_cwd("sess-switch") == str(new.resolve())
+    assert cleaned == ["default"]
+    assert events == [("register", "sess-switch")]
+    assert rc.get_session_cwd("sess-switch") == str(new.resolve())

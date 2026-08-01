@@ -40,24 +40,15 @@ class TestCreateSession:
 
 
     def test_register_task_cwd_translates_windows_drive_for_wsl_tools(self, monkeypatch):
-        captured = {}
+        import agent.runtime_cwd as rc
 
-        def fake_register_task_env_overrides(task_id, overrides):
-            captured["task_id"] = task_id
-            captured["overrides"] = overrides
+        monkeypatch.setattr(rc, "_SESSION_CWDS", {})
 
         monkeypatch.setattr("hermes_constants._wsl_detected", True)
-        monkeypatch.setattr(
-            "tools.terminal_tool.register_task_env_overrides",
-            fake_register_task_env_overrides,
-        )
 
         acp_session._register_task_cwd("session-1", r"E:\Projects\AI\paperclip")
 
-        assert captured == {
-            "task_id": "session-1",
-            "overrides": {"cwd": "/mnt/e/Projects/AI/paperclip"},
-        }
+        assert rc.get_session_cwd("session-1") == "/mnt/e/Projects/AI/paperclip"
 
 
     def test_get_session(self, manager):

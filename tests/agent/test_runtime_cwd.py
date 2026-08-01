@@ -7,10 +7,12 @@ import pytest
 
 import agent.runtime_cwd as rt
 from agent.runtime_cwd import (
+    bind_current_session_key,
     clear_session_cwd,
+    clear_current_session_key,
+    record_session_cwd,
     resolve_agent_cwd,
     resolve_context_cwd,
-    set_session_cwd,
 )
 
 
@@ -56,26 +58,29 @@ class TestSessionCwdOverride:
     """The #29531 per-session arm: a contextvar cwd wins over TERMINAL_CWD so a
     multi-session gateway can pin each session to its own folder."""
 
-    def test_session_cwd_overrides_terminal_cwd(self, monkeypatch, tmp_path):
+    def test_bound_session_record_overrides_terminal_cwd(self, monkeypatch, tmp_path):
         other = tmp_path / "other"
         other.mkdir()
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
-        token = set_session_cwd(str(other))
+        record_session_cwd("sess-a", str(other))
+        token = bind_current_session_key("sess-a")
         try:
             assert resolve_agent_cwd() == other
             assert resolve_context_cwd() == other
         finally:
-            rt._SESSION_CWD.reset(token)
+            rt._CURRENT_SESSION_KEY.reset(token)
+            clear_session_cwd("sess-a")
 
 
-    def test_clear_session_cwd_restores_terminal_cwd(self, monkeypatch, tmp_path):
+    def test_clear_current_session_key_restores_terminal_cwd(self, monkeypatch, tmp_path):
         other = tmp_path / "other"
         other.mkdir()
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
-        token = set_session_cwd(str(other))
+        record_session_cwd("sess-a", str(other))
+        token = bind_current_session_key("sess-a")
         try:
-            clear_session_cwd()
+            clear_current_session_key()
             assert resolve_agent_cwd() == tmp_path
         finally:
-            rt._SESSION_CWD.reset(token)
-
+            rt._CURRENT_SESSION_KEY.reset(token)
+            clear_session_cwd("sess-a")

@@ -807,10 +807,10 @@ def _(rid, params: dict) -> dict:
         session_tokens = _set_session_context(task_id, cwd=(preview_cwd or _session_cwd(session)))
         try:
             from run_agent import AIAgent
-            from tools.terminal_tool import register_task_env_overrides
+            from agent.runtime_cwd import record_session_cwd
 
             if preview_cwd:
-                register_task_env_overrides(task_id, {"cwd": preview_cwd})
+                record_session_cwd(task_id, preview_cwd)
 
             history_note = (
                 f" (with {len(parent_history)} parent-session messages of context)"

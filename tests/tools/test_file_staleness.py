@@ -16,6 +16,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
+import agent.runtime_cwd as rc
 from tools import file_state
 from tools.file_tools import (
     read_file_tool,
@@ -124,7 +125,7 @@ class TestStalenessCheck(unittest.TestCase):
         from tools import terminal_tool
 
         # The session cd'd into the worktree (recorded by the completed command).
-        terminal_tool.record_session_cwd("live_task", live_dir)
+        rc.record_session_cwd("live_task", live_dir)
 
         try:
             with patch.dict(os.environ, {"TERMINAL_CWD": start_dir}, clear=False):
@@ -138,7 +139,7 @@ class TestStalenessCheck(unittest.TestCase):
                     write_file_tool("shared.txt", "replacement", task_id="live_task")
                 )
         finally:
-            terminal_tool.clear_session_cwd("live_task")
+            rc.clear_session_cwd("live_task")
 
         self.assertIn("_warning", result)
         self.assertIn("modified since you last read", result["_warning"])

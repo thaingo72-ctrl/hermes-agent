@@ -105,7 +105,7 @@ def _session_source_for_agent(platform: Optional[str]) -> str:
 
 # OpenAI lazy proxy + safe stdio + proxy URL helpers — see agent/process_bootstrap.py.
 # `OpenAI` is re-exported here so `patch("run_agent.OpenAI", ...)` in tests works.
-# The other `# noqa: F401` re-exports below cover names accessed via
+# The other lint-suppressed re-exports below cover names accessed via
 # `mock.patch("run_agent.<X>")`, `from run_agent import <X>` in production
 # siblings, or the `_ra().<X>` indirection in agent/system_prompt.py — none
 # of which ruff's in-module usage scan can see.
@@ -140,7 +140,7 @@ from model_tools import (
     handle_function_call,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.handle_function_call")
     check_toolset_requirements,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.check_toolset_requirements")
 )
-from tools.terminal_tool import cleanup_vm, get_active_env, teardown_session_runtime_cwd
+from tools.terminal_tool import cleanup_vm, get_active_env
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool import cleanup_browser
 
@@ -4008,11 +4008,6 @@ class AIAgent:
             cleanup_vm(task_id)
         except Exception:
             pass
-        try:
-            teardown_session_runtime_cwd(task_id)
-        except Exception:
-            pass
-
         # 3. Clean browser daemon sessions
         try:
             cleanup_browser(task_id)
