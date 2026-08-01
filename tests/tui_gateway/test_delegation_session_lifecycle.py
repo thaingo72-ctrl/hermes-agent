@@ -107,6 +107,29 @@ class TestInterruptForSession:
         assert ad.interrupt_for_session(session_key="sess_A") == 0
         fn.assert_not_called()
 
+    def test_concurrent_interrupts_keep_session_ownership_deterministic(self):
+        mine_a = [self._seed_record(f"a{i}", session_key="sess_A") for i in range(5)]
+        mine_b = [self._seed_record(f"b{i}", session_key="sess_B") for i in range(5)]
+        gate = threading.Barrier(2)
+        counts = {}
+
+        def interrupt(name, session_key):
+            gate.wait(timeout=2)
+            counts[name] = ad.interrupt_for_session(session_key=session_key)
+
+        threads = [
+            threading.Thread(target=interrupt, args=("a", "sess_A")),
+            threading.Thread(target=interrupt, args=("b", "sess_B")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3)
+
+        assert counts == {"a": 5, "b": 5}
+        for fn in mine_a + mine_b:
+            fn.assert_called_once()
+
 
 class TestFinalizeInterruptsOwnDelegations:
     def _make_session(self, session_key="sess_A", sid="tab1"):

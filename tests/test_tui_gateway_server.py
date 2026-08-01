@@ -16,6 +16,7 @@ from hermes_constants import reset_hermes_home_override, set_hermes_home_overrid
 from hermes_cli.active_sessions import active_session_registry_snapshot
 from hermes_cli.browser_connect import ChromeDebugLaunch
 from tui_gateway import methods_billing
+from tui_gateway import methods_session
 from tui_gateway import server
 from tui_gateway.transport import write_json_frame
 
@@ -90,6 +91,53 @@ def test_session_slot_is_claimed_on_first_turn_not_on_create(monkeypatch, tmp_pa
         server._cfg_mtime = None
         server._cfg_path = None
         reset_hermes_home_override(token)
+
+
+def test_session_handlers_use_owned_services_not_global_rebinding():
+    source = Path(methods_session.__file__).read_text(encoding="utf-8")
+    server_source = Path(server.__file__).read_text(encoding="utf-8")
+
+    assert "HandlerRegistry" not in source
+    assert "FunctionType" not in source
+    assert "def register(" in source and "methods:" in source
+    assert "SessionLifecycleServices" in source
+    assert "DelegationServices" in source
+    assert "PetServices" in source
+    assert "_methods_session" not in server_source
+
+
+def test_concurrent_session_close_claims_live_session_once(monkeypatch):
+    session = {"session_key": "close-key"}
+    server._sessions["close-race"] = session
+    teardown_seen = []
+    gate = threading.Barrier(2)
+
+    def fake_teardown(claimed, *, end_reason="tui_close"):
+        teardown_seen.append(claimed)
+        gate.wait(timeout=2)
+        return claimed is session
+
+    monkeypatch.setattr(server, "_teardown_popped_session", fake_teardown)
+
+    results = []
+    threads = [
+        threading.Thread(
+            target=lambda: results.append(
+                server._methods["session.close"]("rid", {"session_id": "close-race"})
+            )
+        )
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert [r["result"]["closed"] for r in results].count(True) == 1
+    assert [r["result"]["closed"] for r in results].count(False) == 1
+    assert teardown_seen.count(session) == 1
+    assert teardown_seen.count(None) == 1
+    assert "close-race" not in server._sessions
 
 
 def test_session_context_uses_session_cwd(monkeypatch, tmp_path):

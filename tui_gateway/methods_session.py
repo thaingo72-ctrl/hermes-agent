@@ -1,14 +1,170 @@
-"""Session / delegation / spawn-tree / billing / pet JSON-RPC handlers (moved verbatim from server.py).
+"""Session / delegation / spawn-tree / pet JSON-RPC handlers for the TUI gateway.
 
-Handler bodies are byte-identical to their pre-split server.py form; they
-are rebound onto server.py's globals at install time — see method_ctx.py.
+The handlers are registered as ordinary callables. Runtime ownership is passed
+through frozen service bundles so this module no longer rebinds function globals
+onto ``server.py`` at install time.
 """
 
-from .method_ctx import HandlerRegistry
+from __future__ import annotations
 
-_registry = HandlerRegistry()
-method = _registry.method
-_profile_scoped = _registry.profile_scoped
+import json
+import os
+import threading
+import time
+import uuid
+from dataclasses import dataclass, fields
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable
+
+
+@dataclass(frozen=True)
+class SessionLifecycleServices:
+    """Mutable live-session ownership used by session lifecycle RPCs."""
+
+    CompressionLockHeld: type[Exception]
+    DESKTOP_BACKEND_CONTRACT: str
+    _SPAWN_TREE_INDEX: str
+    _apply_compute_host_metadata_mirror: Callable[..., Any]
+    _child_run_active: Callable[..., Any]
+    _claim_or_reuse_live: Callable[..., Any]
+    _clear_inflight_turn: Callable[..., Any]
+    _clear_pending: Callable[..., Any]
+    _clear_session_context: Callable[..., Any]
+    _coerce_seed_history: Callable[..., Any]
+    _completion_cwd: Callable[..., Any]
+    _compress_session_history: Callable[..., Any]
+    _db_unavailable_error: Callable[..., Any]
+    _default_session_cwd: Callable[..., Any]
+    _deferred_session_record: Callable[..., Any]
+    _display_session_cwd: Callable[..., Any]
+    _emit: Callable[..., Any]
+    _emit_session_info_for_session: Callable[..., Any]
+    _enable_gateway_prompts: Callable[..., Any]
+    _enqueue_prompt: Callable[..., Any]
+    _ensure_session_db_row: Callable[..., Any]
+    _err: Callable[..., dict]
+    _find_live_session_by_key: Callable[..., Any]
+    _get_compute_host_supervisor: Callable[..., Any]
+    _get_db: Callable[..., Any]
+    _get_usage: Callable[..., Any]
+    _git_branch_for_cwd: Callable[..., Any]
+    _history_to_messages: Callable[..., Any]
+    _init_session: Callable[..., Any]
+    _lazy_resume_info: Callable[..., Any]
+    _live_session_payload: Callable[..., Any]
+    _load_show_reasoning: Callable[..., Any]
+    _load_tool_progress_mode: Callable[..., Any]
+    _main_runtime_from_agent: Callable[..., Any]
+    _make_agent: Callable[..., Any]
+    _maybe_schedule_auto_continue: Callable[..., Any]
+    _metadata_mirror: Callable[..., Any]
+    _new_session_key: Callable[..., Any]
+    _ok: Callable[..., dict]
+    _pop_session_by_id: Callable[..., Any]
+    _profile_configured_cwd: Callable[..., Any]
+    _profile_db: Callable[..., Any]
+    _profile_home: Callable[..., Any]
+    _project_info_for_cwd: Callable[..., Any]
+    _record_inflight_correction: Callable[..., Any]
+    _register_session_cwd: Callable[..., Any]
+    _resolve_model: Callable[..., Any]
+    _resolve_session_source: Callable[..., Any]
+    _response_profile_name: Callable[..., Any]
+    _schedule_agent_build: Callable[..., Any]
+    _schedule_session_cap_enforcement: Callable[..., Any]
+    _send_compute_host_control: Callable[..., Any]
+    _sess: Callable[..., Any]
+    _sess_nowait: Callable[..., Any]
+    _session_cwd: Callable[..., Any]
+    _session_db: Callable[..., Any]
+    _session_info: Callable[..., Any]
+    _session_live_item: Callable[..., Any]
+    _session_resume_lock: Any
+    _session_source: Callable[..., Any]
+    _session_usage_snapshot: Callable[..., Any]
+    _session_uses_compute_host: Callable[..., Any]
+    _sessions: dict[str, dict]
+    _sessions_lock: Any
+    _set_session_context: Callable[..., Any]
+    _set_session_cwd: Callable[..., Any]
+    _status_update: Callable[..., Any]
+    _stdio_transport: Any
+    _stored_session_runtime_overrides: Callable[..., Any]
+    _sync_session_key_after_compress: Callable[..., Any]
+    _teardown_popped_session: Callable[..., Any]
+    _tts_stream_stop: Callable[..., Any]
+    build_profile_secret_scope: Callable[..., Any]
+    current_transport: Callable[..., Any]
+    get_hermes_home: Callable[..., Any]
+    is_truthy_value: Callable[..., Any]
+    logger: Any
+    os: Any
+    reset_hermes_home_override: Callable[..., Any]
+    reset_secret_scope: Callable[..., Any]
+    sanitize_replay_history: Callable[..., Any]
+    set_hermes_home_override: Callable[..., Any]
+    set_secret_scope: Callable[..., Any]
+    threading: Any
+    time: Any
+
+
+@dataclass(frozen=True)
+class DelegationServices:
+    """Delegation and spawn-tree persistence ownership."""
+
+    _append_spawn_tree_index: Callable[..., Any]
+    _read_spawn_tree_index: Callable[..., Any]
+    _spawn_tree_session_dir: Callable[..., Any]
+    _spawn_trees_root: Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class PetServices:
+    """Pet RPC state and generation ownership."""
+
+    _pet_active_selection: Callable[..., Any]
+    _pet_cancel_arm: Callable[..., Any]
+    _pet_cancel_release: Callable[..., Any]
+    _pet_cancel_request: Callable[..., Any]
+    _pet_config_scale: Callable[..., Any]
+    _pet_gen_root: Callable[..., Any]
+    _pet_gen_sweep: Callable[..., Any]
+    _pet_is_cancelled: Callable[..., Any]
+    _pet_png_data_uri: Callable[..., Any]
+    _pet_reference_images_from_data_url: Callable[..., Any]
+    _pet_sheet_revision: Callable[..., Any]
+    _pet_sprite_payload: Callable[..., Any]
+
+
+@dataclass(frozen=True)
+class SessionMethodServices:
+    lifecycle: SessionLifecycleServices
+    delegation: DelegationServices
+    pet: PetServices
+
+
+_handlers: dict[str, Callable[[Any, dict], dict]] = {}
+
+
+def method(name: str):
+    def dec(fn):
+        _handlers[name] = fn
+        return fn
+
+    return dec
+
+
+def _profile_scoped(fn):
+    fn._hermes_profile_scoped = True
+    return fn
+
+
+def _install_services(services: SessionMethodServices) -> None:
+    target = globals()
+    for bundle in (services.lifecycle, services.delegation, services.pet):
+        for field in fields(bundle):
+            target[field.name] = getattr(bundle, field.name)
 
 
 @method("session.create")
@@ -2740,6 +2896,13 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"cols": session["cols"]})
 
 
-def register(server) -> None:
-    """Bind this module's handlers onto ``server``'s globals and registry."""
-    _registry.install(server)
+def register(
+    methods: dict[str, Callable[[Any, dict], dict]],
+    *,
+    services: SessionMethodServices,
+    profile_scoped: Callable[[Callable[[Any, dict], dict]], Callable[[Any, dict], dict]],
+) -> None:
+    """Install direct callables into the server method table."""
+    _install_services(services)
+    for name, fn in _handlers.items():
+        methods[name] = profile_scoped(fn) if getattr(fn, "_hermes_profile_scoped", False) else fn

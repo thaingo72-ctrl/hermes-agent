@@ -13186,7 +13186,7 @@ from . import (  # noqa: E402
     methods_complete as _methods_complete,
     methods_config as _methods_config,
     methods_prompt as _methods_prompt,
-    methods_session as _methods_session,
+    methods_session,
     methods_tools as _methods_tools,
 )
 
@@ -13195,8 +13195,82 @@ _methods_billing.register(
     services=_methods_billing.default_billing_services(emit=_emit),
 )
 
+
+class _LateBoundMutableGlobal:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def _value(self):
+        return globals()[self._name]
+
+    def __contains__(self, key):
+        return key in self._value()
+
+    def __getitem__(self, key):
+        return self._value()[key]
+
+    def __setitem__(self, key, value) -> None:
+        self._value()[key] = value
+
+    def __delitem__(self, key) -> None:
+        del self._value()[key]
+
+    def __iter__(self):
+        return iter(self._value())
+
+    def get(self, *args, **kwargs):
+        return self._value().get(*args, **kwargs)
+
+    def items(self):
+        return self._value().items()
+
+    def values(self):
+        return self._value().values()
+
+    def clear(self) -> None:
+        self._value().clear()
+
+    def pop(self, *args, **kwargs):
+        return self._value().pop(*args, **kwargs)
+
+
+def _session_service_value(name: str):
+    if name == "_sessions":
+        return _LateBoundMutableGlobal(name)
+    value = globals()[name]
+    if callable(value) and not inspect.isclass(value):
+        return lambda *args, _name=name, **kwargs: globals()[_name](*args, **kwargs)
+    return value
+
+
+methods_session.register(
+    _methods,
+    services=methods_session.SessionMethodServices(
+        lifecycle=methods_session.SessionLifecycleServices(
+            **{
+                field.name: _session_service_value(field.name)
+                for field in methods_session.fields(
+                    methods_session.SessionLifecycleServices
+                )
+            }
+        ),
+        delegation=methods_session.DelegationServices(
+            **{
+                field.name: _session_service_value(field.name)
+                for field in methods_session.fields(methods_session.DelegationServices)
+            }
+        ),
+        pet=methods_session.PetServices(
+            **{
+                field.name: _session_service_value(field.name)
+                for field in methods_session.fields(methods_session.PetServices)
+            }
+        ),
+    ),
+    profile_scoped=_profile_scoped,
+)
+
 for _m in (
-    _methods_session,
     _methods_prompt,
     _methods_config,
     _methods_complete,
