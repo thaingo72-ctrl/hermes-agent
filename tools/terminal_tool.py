@@ -1135,7 +1135,7 @@ def _maybe_reap_docker_orphans(container_config: Dict[str, Any]) -> None:
 # Thread-safe because each task_id is unique per rollout.
 _task_env_overrides: Dict[str, Dict[str, Any]] = {}
 
-# ── Per-session cwd records (cwd rearchitecture, step 1) ────────────────────
+# ── Per-session runtime CWD records ─────────────────────────────────────────
 #
 # The durable source of truth for "which directory is THIS session working
 # in". Keyed by the raw session/task key (NOT the collapsed container id):
@@ -1143,12 +1143,6 @@ _task_env_overrides: Dict[str, Dict[str, Any]] = {}
 # env is a global mutable timeshared between sessions — the root cause of the
 # wrong-worktree bug class (env.cwd_owner stamping, _last_known_cwd, and the
 # ownership ladder in file_tools are all patches over that misplacement).
-#
-# Step 1 (this change): dual-write only. Every site that learns a session's
-# live cwd (post-command tracking, cwd-override registration) also records it
-# here. Readers still use the legacy env.cwd ladder. Later steps flip
-# file_tools and _resolve_command_cwd to read this store, then delete the
-# env-side tracking + ownership guards.
 _session_cwd: Dict[str, str] = {}
 _session_cwd_lock = threading.Lock()
 
@@ -1235,6 +1229,11 @@ def clear_task_env_overrides(task_id: str):
     Called during cleanup to avoid stale entries accumulating.
     """
     _task_env_overrides.pop(task_id, None)
+
+
+def teardown_session_runtime_cwd(task_id: str) -> None:
+    """Clear all runtime CWD state for a true session/task teardown."""
+    clear_task_env_overrides(task_id)
     clear_session_cwd(task_id)
 
 
@@ -2271,15 +2270,13 @@ def terminal_tool(
         else:
             image = ""
 
-        cwd = overrides.get("cwd") or get_session_cwd(task_id) or config["cwd"]
-        # A per-task cwd override (registered by the gateway/TUI for workspace
-        # tracking, or by RL/benchmark envs) wins over config["cwd"] — but
+        cwd = get_session_cwd(task_id) or overrides.get("cwd") or config["cwd"]
+        # A session record or per-task cwd override can beat config["cwd"], but
         # config["cwd"] was already sanitized for container backends in
-        # _get_env_config() while the override is raw. On a container backend a
-        # raw host path (e.g. a Windows desktop session's C:\Users\<user>, or a
-        # POSIX /home/<user>) reaches `docker run -w <host-path>` and the
+        # _get_env_config() while those session values are raw. On a container
+        # backend a raw host path reaches `docker run -w <host-path>` and the
         # container fails to start (exit 125). Re-apply the same host/relative
-        # path guard to the *resolved* cwd so the override can't bypass it.
+        # path guard to the resolved cwd so session values can't bypass it.
         # Valid in-container override paths (RL/benchmark sandboxes that set
         # cwd to /workspace, /root, etc.) are absolute non-host paths and pass
         # through untouched.
@@ -2852,13 +2849,9 @@ def terminal_tool(
                 # Got a result
                 break
 
-            # Dual-write (cwd rearch step 1): the env's post-command tracking
-            # (marker parse / local sync) has just updated env.cwd with the
-            # directory this command finished in. That cwd belongs to THIS
-            # session — record it under the session key so the durable record
-            # never depends on the shared env surviving or on who drives the
-            # env next.
-            record_session_cwd(session_key, getattr(env, "cwd", None))
+            final_cwd = result.get("final_cwd") if isinstance(result, dict) else None
+            if isinstance(final_cwd, str) and final_cwd.strip():
+                record_session_cwd(session_key, final_cwd)
 
             # Extract output
             output = result.get("output", "")
@@ -2941,6 +2934,8 @@ def terminal_tool(
                 "exit_code": returncode,
                 "error": None,
             }
+            if isinstance(final_cwd, str) and final_cwd.strip():
+                result_dict["final_cwd"] = final_cwd
             try:
                 from agent.verification_evidence import record_terminal_result
 

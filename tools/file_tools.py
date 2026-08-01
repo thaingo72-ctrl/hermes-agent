@@ -165,15 +165,14 @@ def _resolve_path(filepath: str, task_id: str = "default") -> Path | PurePosixPa
 # sessions get the same protection. See references/worktree-cwd-discipline.md.
 _TERMINAL_CWD_SENTINELS = frozenset({"", ".", "./", "auto", "cwd"})
 _CONTAINER_PATH_BACKENDS_FALLBACK = frozenset({"docker", "singularity", "modal", "daytona", "vercel_sandbox"})
+_REMOTE_POSIX_PATH_BACKENDS = frozenset({"ssh"})
 
 
-def _terminal_env_type_for_task(task_id: str = "default") -> str:
-    """Best-effort terminal backend type for path-resolution decisions."""
+def _active_environment_for_task(task_id: str = "default"):
     try:
         from tools.terminal_tool import (
             _active_environments,
             _env_lock,
-            _get_env_config,
             _resolve_container_task_id,
         )
 
@@ -182,7 +181,17 @@ def _terminal_env_type_for_task(task_id: str = "default") -> str:
         except Exception:
             container_key = task_id
         with _env_lock:
-            env = _active_environments.get(container_key) or _active_environments.get(task_id)
+            return _active_environments.get(task_id) or _active_environments.get(container_key)
+    except Exception:
+        return None
+
+
+def _terminal_env_type_for_task(task_id: str = "default") -> str:
+    """Best-effort terminal backend type for path-resolution decisions."""
+    try:
+        from tools.terminal_tool import _get_env_config
+
+        env = _active_environment_for_task(task_id)
         if env is not None:
             name = env.__class__.__name__.lower()
             if "local" in name:
@@ -212,6 +221,10 @@ def _uses_container_paths(task_id: str = "default") -> bool:
     return _terminal_env_type_for_task(task_id) in container_backends
 
 
+def _uses_remote_posix_paths(task_id: str = "default") -> bool:
+    return _terminal_env_type_for_task(task_id) in _REMOTE_POSIX_PATH_BACKENDS
+
+
 def _normalize_without_host_deref(path: str | Path | PurePosixPath) -> PurePosixPath:
     """Normalize path syntax without following host symlinks.
 
@@ -220,6 +233,33 @@ def _normalize_without_host_deref(path: str | Path | PurePosixPath) -> PurePosix
     ``/workspace`` and rewrite the path before Docker sees it.
     """
     return PurePosixPath(posixpath.normpath(str(path)))
+
+
+def _remote_home_for_task(task_id: str = "default") -> str:
+    env = _active_environment_for_task(task_id)
+    home = getattr(env, "_remote_home", None)
+    if isinstance(home, str) and home.strip():
+        return posixpath.normpath(home.strip())
+    return "/root"
+
+
+def _expand_remote_tilde(path: str, task_id: str = "default") -> str:
+    if path == "~":
+        return _remote_home_for_task(task_id)
+    if path.startswith("~/"):
+        return posixpath.join(_remote_home_for_task(task_id), path[2:])
+    return path
+
+
+def _resolve_remote_posix_base(task_id: str = "default") -> PurePosixPath:
+    root = _authoritative_workspace_root(task_id)
+    if not root:
+        env = _active_environment_for_task(task_id)
+        root = getattr(env, "cwd", None)
+    base_text = _expand_remote_tilde(str(root or "~"), task_id)
+    if not posixpath.isabs(base_text):
+        base_text = posixpath.join(_remote_home_for_task(task_id), base_text)
+    return _normalize_without_host_deref(base_text)
 
 
 def _sentinel_free_abs_cwd(raw: str | None) -> str | None:
@@ -250,45 +290,8 @@ def _configured_terminal_cwd() -> str | None:
     return _sentinel_free_abs_cwd(os.environ.get("TERMINAL_CWD"))
 
 
-def _registered_task_cwd_override(task_id: str = "default") -> str | None:
-    """Return a registered cwd override for the raw task id, when available.
-
-    ``terminal_tool`` intentionally collapses CWD-only task overrides to the
-    shared ``"default"`` environment so TUI/dashboard/ACP sessions do not spin
-    up isolated sandboxes just because they have different workspaces. The cwd
-    value itself is still keyed by the raw session/task id, so file tools must
-    read that raw override before falling back to the collapsed container key.
-    """
-    try:
-        from tools.terminal_tool import resolve_task_overrides
-
-        overrides = resolve_task_overrides(task_id)
-    except Exception:
-        return None
-
-    return _sentinel_free_abs_cwd(overrides.get("cwd"))
-
-
 def _authoritative_workspace_root(task_id: str = "default") -> str | None:
-    """Best-effort absolute workspace root for divergence checks.
-
-    Resolution:
-
-      1. The session's own cwd RECORD (``terminal_tool.get_session_cwd``) —
-         written on every completed terminal command and seeded by workspace
-         registration, keyed by the raw session id. Because the record is
-         per-session, one session's ``cd`` can never leak into another
-         session's resolution.
-      2. A registered task/session cwd override (TUI/Desktop/ACP sessions
-         register a raw-keyed cwd before any tool runs). Normally already
-         mirrored into the record at registration; kept as a direct fallback
-         so a cleared/never-written record still resolves the workspace.
-      3. A sentinel-free absolute ``$TERMINAL_CWD`` (the worktree path set by
-         ``cli.py``/``main.py`` for ``-w`` sessions).
-
-    Returns ``None`` only when there is genuinely no reliable anchor, in which
-    case callers fall back to the process cwd.
-    """
+    """Best-effort absolute workspace root for local path divergence checks."""
     try:
         from tools.terminal_tool import get_session_cwd
 
@@ -297,9 +300,6 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
         recorded = None
     if recorded:
         return recorded
-    registered = _registered_task_cwd_override(task_id)
-    if registered:
-        return registered
     return _configured_terminal_cwd()
 
 
@@ -311,14 +311,12 @@ def _resolve_base_dir(
     """Return the ABSOLUTE base directory for resolving relative paths.
 
     Resolution order:
-      1. The task's live terminal cwd (the directory the agent is actually
-         working in — e.g. a git worktree). Authoritative when known.
-      2. A registered task/session cwd override (TUI/Desktop/ACP sessions
-         register a raw-keyed workspace cwd before any terminal command runs).
-      3. A sentinel-free, absolute ``$TERMINAL_CWD`` (the worktree path set by
+      1. The task's recorded runtime cwd (the directory the agent is actually
+         working in, including any prior ``cd``). Authoritative when known.
+      2. A sentinel-free, absolute ``$TERMINAL_CWD`` (the worktree path set by
          ``cli.py``/``main.py`` for ``-w`` sessions). Used even before any
          terminal command has populated the live cwd registry.
-      4. The process cwd.
+      3. The process cwd.
 
     The returned base is ALWAYS absolute. This is the core invariant that
     prevents the worktree-cwd divergence bug: a relative or sentinel
@@ -333,6 +331,8 @@ def _resolve_base_dir(
     root = _authoritative_workspace_root(task_id)
     if container_paths is None:
         container_paths = _uses_container_paths(task_id)
+    if _uses_remote_posix_paths(task_id):
+        return _resolve_remote_posix_base(task_id)
     if root:
         base_text = _expand_tilde(root)
     else:
@@ -372,6 +372,12 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path | Pu
     treat them as relative ``\\c\\Users\\...`` under the process cwd.
     """
     container_paths = _uses_container_paths(task_id)
+    if _uses_remote_posix_paths(task_id):
+        expanded = _expand_remote_tilde(filepath, task_id)
+        if posixpath.isabs(expanded):
+            return _normalize_without_host_deref(expanded)
+        resolved = _resolve_remote_posix_base(task_id) / expanded
+        return _normalize_without_host_deref(resolved)
     if container_paths:
         expanded = _expand_tilde(filepath)
         if posixpath.isabs(expanded):
@@ -408,10 +414,8 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
     target. ``None`` when the path is absolute, the base is unknown, or the
     resolved path is correctly under the workspace root.
 
-    The workspace root is the live terminal cwd when known, else a registered
-    task/session cwd override, else a sentinel-free absolute ``$TERMINAL_CWD``
-    — so a worktree or Desktop session whose terminal registry is still empty
-    (no ``cd`` run yet) is warned on the very first write.
+    The workspace root is the recorded runtime cwd when known, else a
+    sentinel-free absolute ``$TERMINAL_CWD``.
     """
     try:
         if Path(_expand_tilde(filepath)).is_absolute():
@@ -513,6 +517,35 @@ def _is_blocked_device(filepath: str, base_dir: str | Path | None = None) -> boo
     if _is_blocked_device_path(resolved):
         return True
     return False
+
+
+def _rewrite_v4a_patch_paths_for_task(patch_content: str, task_id: str = "default") -> str:
+    """Rewrite V4A file headers to task-resolved paths before backend apply."""
+    import re as _re
+
+    def _resolved(path_text: str) -> str:
+        return str(_resolve_path_for_task(path_text.strip(), task_id))
+
+    def _replace_file_header(match: _re.Match[str]) -> str:
+        return f"*** {match.group(1)} File: {_resolved(match.group(2))}"
+
+    def _replace_move_header(match: _re.Match[str]) -> str:
+        src = _resolved(match.group(1))
+        dst = _resolved(match.group(2))
+        return f"*** Move File: {src} -> {dst}"
+
+    rewritten = _re.sub(
+        r'^\*\*\*\s*(Update|Add|Delete)\s+File:\s*(.+)$',
+        _replace_file_header,
+        patch_content,
+        flags=_re.MULTILINE,
+    )
+    return _re.sub(
+        r'^\*\*\*\s*Move\s+File:\s*(.+?)\s*->\s*(.+)$',
+        _replace_move_header,
+        rewritten,
+        flags=_re.MULTILINE,
+    )
 
 
 def _search_result_read_block_error(path: str, task_id: str = "default") -> str | None:
@@ -1018,12 +1051,12 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                 recorded_cwd = get_session_cwd(raw_task_id)
             except Exception:
                 recorded_cwd = None
-            cwd = overrides.get("cwd") or recorded_cwd or config["cwd"]
+            cwd = recorded_cwd or overrides.get("cwd") or config["cwd"]
             # Re-apply the container cwd guard that _get_env_config() already
-            # ran on config["cwd"] (see #50636).  A per-task cwd override
-            # registered by the gateway/TUI/ACP for workspace tracking is a
-            # raw host path (e.g. a Desktop session's /Users/<me>/workspace or
-            # C:\\Users\\<me>). On a container backend that reaches
+            # ran on config["cwd"] (see #50636). A recorded local cwd or
+            # per-task cwd override is a raw host path (e.g. a Desktop
+            # session's /Users/<me>/workspace or C:\\Users\\<me>). On a
+            # container backend that reaches
             # ``docker run -w <host-path>`` and the container starts in a
             # directory that doesn't exist inside the sandbox, so search_files
             # and friends silently return empty results (#54447).  Sanitize it
@@ -1768,7 +1801,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
             elif mode == "patch":
                 if not patch:
                     return tool_error("patch content required")
-                result = file_ops.patch_v4a(patch)
+                resolved_patch = _rewrite_v4a_patch_paths_for_task(patch, task_id)
+                result = file_ops.patch_v4a(resolved_patch)
             else:
                 return tool_error(f"Unknown mode: {mode}")
 

@@ -134,6 +134,27 @@ def test_container_relative_path_keeps_container_cwd_symlink(tmp_path, monkeypat
     assert resolved != host_project / "oilsands-sim" / "README.md"
 
 
+def test_ssh_first_file_operation_resolves_on_remote_posix_cwd(monkeypatch):
+    """First SSH file op must not run host Path.resolve() on remote paths."""
+    monkeypatch.setattr(terminal_tool, "_session_cwd", {})
+    monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
+    monkeypatch.setattr(terminal_tool, "_resolve_container_task_id", lambda task_id: task_id or "default")
+    monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: {"env_type": "ssh"})
+
+    class FakeSSHEnvironment:
+        cwd = "~/project"
+        _remote_home = "/home/remote"
+
+    monkeypatch.setattr(terminal_tool, "_active_environments", {"ssh-sess": FakeSSHEnvironment()})
+    monkeypatch.setattr(ft, "_file_ops_cache", {})
+
+    resolved_relative = ft._resolve_path_for_task("src/app.py", task_id="ssh-sess")
+    resolved_tilde = ft._resolve_path_for_task("~/notes.txt", task_id="ssh-sess")
+
+    assert resolved_relative == PurePosixPath("/home/remote/project/src/app.py")
+    assert resolved_tilde == PurePosixPath("/home/remote/notes.txt")
+
+
 class _DummyDockerEnvironment:
     cwd = "/workspace"
     cwd_owner = "default"
