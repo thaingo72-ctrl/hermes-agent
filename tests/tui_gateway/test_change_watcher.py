@@ -11,6 +11,7 @@ import time
 
 import pytest
 
+from tui_gateway import methods_pet
 from tui_gateway import server
 
 
@@ -166,7 +167,7 @@ def test_renderable_pet_broadcasts_meta_payload(watcher_home, monkeypatch):
         exists = True
         spritesheet = sheet
 
-    monkeypatch.setattr(server, "_pet_active_selection", lambda: (True, FakePet(), 0.33))
+    monkeypatch.setattr(methods_pet, "pet_active_selection", lambda services: (True, FakePet(), 0.33))
     server._broadcast_watched_changes(now=10.0)
 
     pet_events = [e for e in events if e[0] == "pet.changed"]
