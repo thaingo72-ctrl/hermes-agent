@@ -405,7 +405,7 @@ def _parse_service_tier_config(raw: str) -> str | None:
     logger.warning("Unknown service_tier '%s', ignoring", raw)
     return None
 
-def load_cli_config() -> Dict[str, Any]:
+def load_cli_config(*, include_user_config: Optional[bool] = None) -> Dict[str, Any]:
     """
     Load CLI configuration from config files.
     
@@ -416,11 +416,10 @@ def load_cli_config() -> Dict[str, Any]:
     Environment variables take precedence over config file values.
     Returns default values if no config file exists.
 
-    If HERMES_IGNORE_USER_CONFIG=1 is set (via ``hermes chat --ignore-user-config``),
-    the user config at ``~/.hermes/config.yaml`` is skipped entirely and only the
-    built-in defaults plus the project-level ``cli-config.yaml`` (if any) are used.
-    Credentials in ``.env`` are still loaded — this flag only suppresses
-    behavioral/config settings.
+    ``include_user_config=False`` skips the user config at
+    ``~/.hermes/config.yaml`` entirely and only the built-in defaults plus the
+    project-level ``cli-config.yaml`` (if any) are used. Credentials in ``.env``
+    are still loaded — this option only suppresses behavioral/config settings.
     """
     # Check user config first ({HERMES_HOME}/config.yaml)
     user_config_path = _hermes_home / 'config.yaml'
@@ -428,10 +427,11 @@ def load_cli_config() -> Dict[str, Any]:
 
     # --ignore-user-config: force-skip the user config.yaml (still honor project
     # config as a fallback so defaults stay sensible).
-    ignore_user_config = os.environ.get("HERMES_IGNORE_USER_CONFIG") == "1"
+    if include_user_config is None:
+        include_user_config = os.environ.get("HERMES_IGNORE_USER_CONFIG") != "1"
 
     # Use user config if it exists, otherwise project config
-    if user_config_path.exists() and not ignore_user_config:
+    if user_config_path.exists() and include_user_config:
         config_path = user_config_path
     else:
         config_path = project_config_path
@@ -631,6 +631,17 @@ def load_cli_config() -> Dict[str, Any]:
     from hermes_cli import managed_scope
 
     defaults = managed_scope.apply_managed_overlay(defaults)
+
+    if config_path == user_config_path and include_user_config:
+        from hermes_cli.config import load_typed_config
+
+        typed_config = load_typed_config(
+            include_user_config=True,
+            config_path=user_config_path,
+        )
+        defaults["model"] = typed_config.model.model_dump(mode="python")
+        if isinstance(defaults.get("agent"), dict):
+            defaults["agent"]["max_turns"] = typed_config.agent.max_turns
 
     # Apply terminal config to environment variables (so terminal_tool picks them up)
     terminal_config = defaults.get("terminal", {})
