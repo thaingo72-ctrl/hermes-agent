@@ -73,23 +73,10 @@ def _split_frontmatter(text: str) -> Optional[Dict[str, Any]]:
     """Return the parsed YAML frontmatter mapping, or None if absent/invalid."""
     if not isinstance(text, str):
         return None
-    stripped = text.lstrip("\ufeff").lstrip()  # BOM is not whitespace; strip explicitly
-    if not stripped.startswith("---"):
-        return None
-    # Find the closing fence after the opening one.
-    after_open = stripped[3:]
-    end = after_open.find("\n---")
-    if end == -1:
-        return None
-    fm_text = after_open[:end]
-    try:
-        import yaml
+    from agent.skill_utils import parse_frontmatter
 
-        data = yaml.safe_load(fm_text)
-    except Exception as e:  # pragma: no cover - malformed YAML
-        logger.debug("blueprint: frontmatter YAML parse failed: %s", e)
-        return None
-    return data if isinstance(data, dict) else None
+    frontmatter, _body = parse_frontmatter(text.lstrip())
+    return frontmatter or None
 
 
 def parse_blueprint(skill_md_text: str) -> Optional[BlueprintSpec]:

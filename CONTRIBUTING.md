@@ -164,7 +164,7 @@ uv venv ~/.hermes/venvs/hermes-dev --python 3.11
 export VIRTUAL_ENV="$HOME/.hermes/venvs/hermes-dev"
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Install with all extras (messaging, cron, CLI menus, dev tools)
+# Install with all extras (messaging, CLI menus, dev tools)
 uv pip install -e ".[all,dev]"
 
 # Optional: browser tools
@@ -291,7 +291,7 @@ hermes-agent/
 | `~/.hermes/skills/` | All active skills (bundled + hub-installed + agent-created) |
 | `~/.hermes/memories/` | Persistent memory (MEMORY.md, USER.md) |
 | `~/.hermes/state.db` | SQLite session database |
-| `~/.hermes/sessions/` | Gateway routing index (`sessions.json`), request-dump breadcrumbs, gateway `*.jsonl` transcripts, and (optionally) per-session JSON snapshots when `sessions.write_json_snapshots: true` is set. The per-session snapshots are off by default; state.db is canonical. |
+| `~/.hermes/sessions/` | Request-dump breadcrumbs, gateway `*.jsonl` transcripts, and (optionally) per-session JSON snapshots when `sessions.write_json_snapshots: true` is set. Gateway routing and messages are canonical in `state.db`. |
 | `~/.hermes/cron/` | Scheduled job data |
 | `~/.hermes/whatsapp/session/` | WhatsApp bridge credentials |
 

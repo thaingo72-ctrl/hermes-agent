@@ -388,10 +388,10 @@ def _job_output_dir(job_id: str) -> Path:
     return _current_cron_store().output_dir / text
 
 
-def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = None) -> List[str]:
-    """Normalize legacy/single-skill and multi-skill inputs into a unique ordered list."""
+def _normalize_skill_list(skills: Optional[Any] = None) -> List[str]:
+    """Normalize multi-skill input into a unique ordered list."""
     if skills is None:
-        raw_items = [skill] if skill else []
+        raw_items = []
     elif isinstance(skills, str):
         raw_items = [skills]
     else:
@@ -406,11 +406,11 @@ def _normalize_skill_list(skill: Optional[str] = None, skills: Optional[Any] = N
 
 
 def _apply_skill_fields(job: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a job dict with canonical `skills` and legacy `skill` fields aligned."""
+    """Return a job dict with canonical `skills` list only."""
     normalized = dict(job)
-    skills = _normalize_skill_list(normalized.get("skill"), normalized.get("skills"))
+    skills = _normalize_skill_list(normalized.get("skills"))
     normalized["skills"] = skills
-    normalized["skill"] = skills[0] if skills else None
+    normalized.pop("skill", None)
     return normalized
 
 
@@ -1194,14 +1194,14 @@ def load_jobs() -> List[Dict[str, Any]]:
             # Hit control-character corruption — rewrite with proper escaping.
             save_jobs(jobs)
             logger.warning("Auto-repaired jobs.json (had invalid control characters)")
-        return jobs
+        return [_normalize_job_record(job) for job in jobs if isinstance(job, dict)]
     if isinstance(data, list):
         # Bare array — likely saved/edited outside save_jobs(). Wrap it back
         # into the expected {"jobs": [...]} structure.
         if data:
             save_jobs(data)
             logger.warning("Auto-repaired jobs.json (bare list wrapped as dict)")
-        return data
+        return [_normalize_job_record(job) for job in data if isinstance(job, dict)]
 
     raise RuntimeError(
         f"Cron database corrupted: expected {{'jobs': [...]}}, got {type(data).__name__}"
@@ -1396,7 +1396,6 @@ def create_job(
     repeat: Optional[int] = None,
     deliver: Optional[str] = None,
     origin: Optional[Dict[str, Any]] = None,
-    skill: Optional[str] = None,
     skills: Optional[List[str]] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
@@ -1419,7 +1418,6 @@ def create_job(
         repeat: How many times to run (None = forever, 1 = once)
         deliver: Where to deliver output ("origin", "local", "telegram", etc.)
         origin: Source info where job was created (for "origin" delivery)
-        skill: Optional legacy single skill name to load before running the prompt
         skills: Optional ordered list of skills to load before running the prompt
         model: Optional per-job model override
         provider: Optional per-job provider override
@@ -1472,7 +1470,7 @@ def create_job(
     job_id = uuid.uuid4().hex[:12]
     now = _hermes_now().isoformat()
 
-    normalized_skills = _normalize_skill_list(skill, skills)
+    normalized_skills = _normalize_skill_list(skills)
     normalized_model = _normalize_job_optional_text(model)
     normalized_provider = _normalize_job_optional_text(provider)
     normalized_base_url = _normalize_job_optional_text(base_url, strip_trailing_slash=True)
@@ -1539,7 +1537,6 @@ def create_job(
         "name": name or label_source[:50].strip(),
         "prompt": prompt_text,
         "skills": normalized_skills,
-        "skill": normalized_skills[0] if normalized_skills else None,
         "model": normalized_model,
         "provider": normalized_provider,
         # Provider/model resolution captured at creation for unpinned jobs
@@ -1683,10 +1680,10 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 {"provider", "model", "base_url", "no_agent"}.intersection(updates)
             ) and _normalized_inference_axes(updated) != previous_inference_axes
 
-            if "skills" in updates or "skill" in updates:
-                normalized_skills = _normalize_skill_list(updated.get("skill"), updated.get("skills"))
+            if "skills" in updates:
+                normalized_skills = _normalize_skill_list(updated.get("skills"))
                 updated["skills"] = normalized_skills
-                updated["skill"] = normalized_skills[0] if normalized_skills else None
+                updated.pop("skill", None)
 
             if schedule_changed:
                 updated_schedule = updated["schedule"]
@@ -2649,7 +2646,7 @@ def referenced_skill_names() -> Set[str]:
     for job in jobs:
         if not isinstance(job, dict):
             continue
-        for name in _normalize_skill_list(job.get("skill"), job.get("skills")):
+        for name in _normalize_skill_list(job.get("skills")):
             cleaned = str(name).strip().lstrip("/")
             if cleaned:
                 names.add(cleaned)
@@ -2677,7 +2674,6 @@ def rewrite_skill_refs(
     - A skill listed in ``pruned`` is dropped outright — there is no
       forwarding target.
     - Ordering and other skills in the list are preserved.
-    - The legacy ``skill`` field is realigned via ``_apply_skill_fields``.
 
     Args:
         consolidated: mapping of ``old_skill_name -> umbrella_skill_name``.
@@ -2721,7 +2717,7 @@ def rewrite_skill_refs(
         changed = False
 
         for job in jobs:
-            skills_before = _normalize_skill_list(job.get("skill"), job.get("skills"))
+            skills_before = _normalize_skill_list(job.get("skills"))
             if not skills_before:
                 continue
 
@@ -2744,7 +2740,7 @@ def rewrite_skill_refs(
                 continue
 
             job["skills"] = new_skills
-            job["skill"] = new_skills[0] if new_skills else None
+            job.pop("skill", None)
             changed = True
 
             rewrites.append({

@@ -413,6 +413,11 @@ class TestJobCRUD:
         assert fetched is not None
         assert fetched["prompt"] == "Check server status"
 
+    def test_create_stores_only_skills_list(self, tmp_cron_dir):
+        job = create_job(prompt="", schedule="30m", skills=["alpha"])
+        assert job["skills"] == ["alpha"]
+        assert "skill" not in job
+
     def test_list_jobs(self, tmp_cron_dir):
         create_job(prompt="Job 1", schedule="every 1h")
         create_job(prompt="Job 2", schedule="every 2h")
@@ -1281,5 +1286,4 @@ class TestJobsJsonUtf8Bom:
 
         loaded = load_jobs()
         assert [j["id"] for j in loaded] == ["plainjob01"]
-
 

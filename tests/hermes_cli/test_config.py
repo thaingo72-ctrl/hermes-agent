@@ -76,13 +76,13 @@ class TestLoadConfigDefaults:
             assert config["terminal"]["backend"] == "local"
             assert config["display"]["interim_assistant_messages"] is True
 
-    def test_legacy_root_level_max_turns_migrates_to_agent_config(self, tmp_path):
+    def test_root_level_max_turns_is_removed_without_migration(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             config_path = tmp_path / "config.yaml"
             config_path.write_text("max_turns: 42\n")
 
             config = load_config()
-            assert config["agent"]["max_turns"] == 42
+            assert config["agent"]["max_turns"] == DEFAULT_CONFIG["agent"]["max_turns"]
             assert "max_turns" not in config
 
 

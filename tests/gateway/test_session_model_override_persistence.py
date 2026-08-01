@@ -3,25 +3,25 @@
 ``GatewayRunner._session_model_overrides`` is in-memory, so before persistence
 a gateway restart silently reverted every session to the global default model.
 The non-secret parts (model/provider/base_url) are now written through to the
-session store (``SessionEntry.model_override`` in sessions.json) and lazily
+session store routing row and lazily
 rehydrated on first use after a restart, with credentials re-resolved through
 the normal runtime provider resolution.
 
 Covers:
   - the override survives a simulated restart (a second SessionStore instance
-    reading the same sessions dir, and a fresh runner rehydrating from it)
+    reading the same state.db routing rows, and a fresh runner rehydrating from it)
   - /new (SessionStore.reset_session) clears the persisted override so a
     restart cannot resurrect it
-  - api_key is NEVER serialized to sessions.json
+  - api_key is NEVER serialized
 """
-import json
 from unittest.mock import patch
 
 import pytest
 
+from hermes_state import SessionDB
+
 from gateway.config import GatewayConfig, Platform
 from gateway.session import (
-    SessionEntry,
     SessionSource,
     SessionStore,
     sanitize_model_override,
@@ -47,29 +47,21 @@ def _make_source() -> SessionSource:
 
 
 @pytest.fixture
-def store_factory(tmp_path, monkeypatch):
-    """Build SessionStores over a shared sessions dir, without SQLite."""
-
-    def _raise():
-        raise RuntimeError("SQLite disabled in test")
-
-    import hermes_state
-
-    monkeypatch.setattr(hermes_state, "SessionDB", _raise)
+def store_factory(tmp_path):
+    """Build SessionStores over shared temp state.db routing rows."""
+    db_path = tmp_path / "state.db"
 
     def _make() -> SessionStore:
         store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
-        assert store._db is None
+        if store._db is not None:
+            store._db.close()
+        store._db = SessionDB(db_path=db_path)
         return store
 
     return _make
 
 
-def _sessions_json(tmp_path) -> str:
-    return (tmp_path / "sessions.json").read_text(encoding="utf-8")
-
-
-def test_override_persists_and_survives_restart(store_factory, tmp_path):
+def test_override_persists_and_survives_restart(store_factory):
     store = store_factory()
     entry = store.get_or_create_session(_make_source())
     session_key = entry.session_key

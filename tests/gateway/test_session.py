@@ -139,7 +139,7 @@ class TestBuildSessionContextPrompt:
                 chat_name="Server",
                 chat_type="group",
                 user_name="alice",
-                guild_id="guild-123",
+                scope_id="guild-123",
                 message_id=msg_id,
             )
             ctx = build_session_context(source, config)
@@ -536,7 +536,7 @@ class TestSlackWorkspaceSessionIsolation:
             user_id="U_SHARED",
         )
         scoped_key = build_session_key(source)
-        legacy_key = build_session_key(replace(source, scope_id=None, guild_id=None))
+        legacy_key = build_session_key(replace(source, scope_id=None))
         store._db = MagicMock()
         store._db.find_latest_gateway_session_for_peer.side_effect = [
             None,
@@ -752,7 +752,7 @@ class TestSlackWorkspaceSessionKeys:
 
         # Then
         assert key == "agent:main:slack:dm:T_ALPHA:D123"
-        unscoped = replace(source, scope_id=None, guild_id=None)
+        unscoped = replace(source, scope_id=None)
         assert build_session_key(unscoped) == "agent:main:slack:dm:D123"
 
 
@@ -788,9 +788,11 @@ class TestSlackWorkspaceSessionKeys:
             platform=Platform.SLACK,
             chat_type="channel",
         )
-        (tmp_path / "sessions.json").write_text(
-            json.dumps({legacy_key: legacy_entry.to_dict()}), encoding="utf-8"
-        )
+        store_for_legacy = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        store_for_legacy._entries[legacy_key] = legacy_entry
+        store_for_legacy._loaded = True
+        store_for_legacy._save()
+        store_for_legacy._db.close()
         store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
 
         # When
@@ -969,38 +971,6 @@ class TestSessionEntryFromDictSessionKeyTraversalStillRejected:
             SessionEntry.from_dict(self._entry(session_key="agent:main:../../secret"))
 
 
-class TestEnsureLoadedSkipsInvalidEntries:
-    """Regression: one bad sessions.json entry must not block valid entries from loading."""
-
-    def test_invalid_entry_skipped_valid_entry_loads(self, tmp_path):
-        import json
-        from gateway.session import SessionStore
-        from gateway.config import GatewayConfig
-
-        sessions_file = tmp_path / "sessions.json"
-        sessions_file.write_text(json.dumps({
-            "bad:key": {
-                "session_key": "bad:key",
-                "session_id": "../../evil",
-                "created_at": "2026-01-01T00:00:00",
-                "updated_at": "2026-01-01T00:00:00",
-            },
-            "agent:main:local:dm": {
-                "session_key": "agent:main:local:dm",
-                "session_id": "good123",
-                "created_at": "2026-01-01T00:00:00",
-                "updated_at": "2026-01-01T00:00:00",
-            },
-        }), encoding="utf-8")
-
-        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
-        store._ensure_loaded()
-
-        assert "bad:key" not in store._entries
-        assert "agent:main:local:dm" in store._entries
-        assert store._entries["agent:main:local:dm"].session_id == "good123"
-
-
 class TestSessionStoreEntriesAttribute:
     """Regression: /reset must access _entries, not _sessions."""
 
@@ -1089,11 +1059,9 @@ class TestSessionMetadata:
 
 
     def test_session_metadata_survives_reload(self, tmp_path):
-        """Metadata written through the store must survive a full reload
-        from disk (simulated gateway restart)."""
+        """Metadata written through the store must survive a state.db reload."""
         config = GatewayConfig()
         store = SessionStore(sessions_dir=tmp_path, config=config)
-        store._db = None  # force sessions.json path
         source = SessionSource(
             platform=Platform.SLACK,
             chat_id="C123",
@@ -1108,9 +1076,9 @@ class TestSessionMetadata:
             "slack_thread_watermark:C123:123.000",
             "123.456",
         )
+        store._db.close()
 
         reloaded = SessionStore(sessions_dir=tmp_path, config=config)
-        reloaded._db = None
         assert (
             reloaded.get_session_metadata(
                 entry.session_key,
@@ -1118,6 +1086,7 @@ class TestSessionMetadata:
             )
             == "123.456"
         )
+        reloaded._db.close()
 
 
 class TestRewriteTranscriptPreservesReasoning:
@@ -1343,9 +1312,7 @@ class TestGatewayRoutingTable:
         entry.suspended = True
         store.set_model_override(entry.session_key, {"model": "test-model"})
 
-        # Kill the JSON mirror entirely — the DB routing table must carry
-        # the complete entry, not just the key mapping.
-        (tmp_path / "sessions.json").unlink()
+        assert not (tmp_path / "sessions.json").exists()
         store._db.close()
 
         restarted = SessionStore(sessions_dir=tmp_path, config=config)
@@ -1357,8 +1324,8 @@ class TestGatewayRoutingTable:
         assert rehydrated.model_override == {"model": "test-model"}
         restarted._db.close()
 
-    def test_write_sessions_json_false_stops_producing_file(self, tmp_path):
-        config = GatewayConfig(write_sessions_json=False)
+    def test_session_store_does_not_write_legacy_routing_file(self, tmp_path):
+        config = GatewayConfig()
         store = SessionStore(sessions_dir=tmp_path, config=config)
         entry = store.get_or_create_session(self._source())
         assert not (tmp_path / "sessions.json").exists()
@@ -1370,4 +1337,52 @@ class TestGatewayRoutingTable:
         assert recovered.session_id == entry.session_id
         restarted._db.close()
 
+    def test_sessions_json_is_ignored_when_state_db_has_no_route(self, tmp_path):
+        config = GatewayConfig()
+        source = self._source()
+        key = build_session_key(source)
+        now = datetime.now()
+        stale = SessionEntry(
+            session_id="stale-json-session",
+            origin=source,
+            session_key=key,
+            created_at=now,
+            updated_at=now,
+        )
+        (tmp_path / "sessions.json").write_text(
+            json.dumps({key: stale.to_dict()}),
+            encoding="utf-8",
+        )
 
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+        entry = store.get_or_create_session(source)
+
+        assert entry.session_id != "stale-json-session"
+        store._db.close()
+
+
+class TestSessionSourceScopeOnly:
+    def test_to_dict_emits_scope_id_without_guild_alias(self):
+        source = SessionSource(
+            platform=Platform.DISCORD,
+            chat_id="chan-1",
+            chat_type="group",
+            scope_id="guild-123",
+        )
+
+        data = source.to_dict()
+
+        assert data["scope_id"] == "guild-123"
+        assert "guild_id" not in data
+
+    def test_from_dict_ignores_legacy_guild_alias(self):
+        source = SessionSource.from_dict(
+            {
+                "platform": "discord",
+                "chat_id": "chan-1",
+                "chat_type": "group",
+                "guild_id": "guild-123",
+            }
+        )
+
+        assert source.scope_id is None

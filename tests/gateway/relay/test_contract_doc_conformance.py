@@ -117,10 +117,9 @@ def _session_source_wire_keys() -> set[str]:
         chat_topic="topic",
         user_id_alt="ua",
         chat_id_alt="ca",
-        guild_id="g",
+        scope_id="g",
         parent_chat_id="p",
         message_id="m",
     )
     return set(src.to_dict().keys())
-
 

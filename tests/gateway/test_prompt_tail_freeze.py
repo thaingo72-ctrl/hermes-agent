@@ -131,7 +131,7 @@ class TestEphemeralChangeKeyParity:
         ("user_name_cleared", dict(user_name=None)),
         ("user_id", dict(user_name=None, user_id="1234")),
         ("shared_multi_user", dict(shared_multi_user=True)),
-        ("guild_id", dict(guild_id="123123123")),
+        ("scope_id", dict(scope_id="123123123")),
         ("parent_chat_id", dict(parent_chat_id="999000111")),
         ("chat_id", dict(chat_id="999999999", parent_chat_id="999999999")),
         ("platform", dict(platform=Platform.TELEGRAM)),
@@ -184,7 +184,7 @@ class TestEphemeralChangeKeyParity:
                 chat_id="C123",
                 thread_id=None,
                 parent_chat_id=None,
-                guild_id=None,
+                scope_id=None,
             )
 
         t1 = runner._pinned_session_context_prompt(_slack_ctx(), False, "sk-slack")  # noqa: SLF001

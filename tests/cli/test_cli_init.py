@@ -83,9 +83,9 @@ class TestMaxTurnsResolution:
 
 
 
-    def test_legacy_root_max_turns_is_used_when_agent_key_exists_without_value(self):
+    def test_root_max_turns_is_ignored_when_agent_key_missing_value(self):
         cli_obj = _make_cli(config_overrides={"agent": {}, "max_turns": 77})
-        assert cli_obj.max_turns == 77
+        assert cli_obj.max_turns == 500
 
 
 
@@ -521,7 +521,6 @@ class TestRootLevelProviderOverride:
         result = _normalize_root_model_keys({"model": {"model": "m-key", "name": "n-key"}})
         assert result["model"]["default"] == "m-key"
         assert "model" not in result["model"] and "name" not in result["model"]
-
 
 
 

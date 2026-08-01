@@ -2543,8 +2543,7 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
     )
     prompt = cron_hint + prompt
     if skills is None:
-        legacy = job.get("skill")
-        skills = [legacy] if legacy else []
+        skills = []
     elif isinstance(skills, str):
         skills = [skills]
 

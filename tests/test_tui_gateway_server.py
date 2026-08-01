@@ -12882,7 +12882,7 @@ def test_make_agent_handles_null_agent_config(monkeypatch):
     with patch("run_agent.AIAgent") as mock_agent:
         server._make_agent("sid1", "key1")
 
-    assert mock_agent.call_args.kwargs["max_iterations"] == 80
+    assert mock_agent.call_args.kwargs["max_iterations"] == 500
 
 
 class _FakeAgentForBackground:
@@ -12915,12 +12915,12 @@ def test_background_agent_kwargs_reads_nested_max_turns(monkeypatch):
     assert kwargs["max_iterations"] == 300
 
 
-def test_background_agent_kwargs_falls_back_to_root_max_turns(monkeypatch):
+def test_background_agent_kwargs_ignores_root_max_turns(monkeypatch):
     monkeypatch.setattr(server, "_load_cfg", lambda: {"max_turns": 50})
 
     kwargs = server._background_agent_kwargs(_FakeAgentForBackground(), "task_1")
 
-    assert kwargs["max_iterations"] == 50
+    assert kwargs["max_iterations"] == 25
 
 
 def test_background_agent_kwargs_defaults_to_25(monkeypatch):
@@ -12936,7 +12936,7 @@ def test_background_agent_kwargs_handles_null_agent_config(monkeypatch):
 
     kwargs = server._background_agent_kwargs(_FakeAgentForBackground(), "task_1")
 
-    assert kwargs["max_iterations"] == 40
+    assert kwargs["max_iterations"] == 25
 
 
 def test_config_show_displays_nested_max_turns(monkeypatch):

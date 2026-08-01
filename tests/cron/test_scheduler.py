@@ -850,7 +850,7 @@ class TestRunJobSkillBacked:
             "id": "skill-env-job",
             "name": "skill env test",
             "prompt": "Use the skill.",
-            "skill": "notion",
+            "skills": ["notion"],
         }
 
         fake_db = MagicMock()
@@ -1899,5 +1899,4 @@ class TestSetCronSessionTitle:
         out = _set_cron_session_title(db, "sess-1", "Nightly Synthesis")
         assert out == "Nightly Synthesis #2"
         db.get_next_title_in_lineage.assert_called_once_with("Nightly Synthesis")
-
 

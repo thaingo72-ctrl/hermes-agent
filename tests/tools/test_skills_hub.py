@@ -37,6 +37,20 @@ from tools.skills_hub import (
 
 
 class TestParseFrontmatterQuick:
+    def test_delegates_to_central_parser(self, monkeypatch):
+        calls = []
+
+        def fake_parse(content):
+            calls.append(content)
+            return {"name": "central"}, "Body"
+
+        monkeypatch.setattr("agent.skill_utils.parse_frontmatter", fake_parse)
+
+        assert GitHubSource._parse_frontmatter_quick("---\nname: local\n---\nBody") == {
+            "name": "central"
+        }
+        assert calls == ["---\nname: local\n---\nBody"]
+
     def test_valid_frontmatter_including_nested_yaml(self):
         content = "---\nname: test-skill\ndescription: A test.\n---\n\n# Body\n"
         fm = GitHubSource._parse_frontmatter_quick(content)
@@ -51,7 +65,6 @@ class TestParseFrontmatterQuick:
             "# Just a heading\nSome body text.\n",     # no frontmatter at all
             "---\nname: test\nno closing here\n",      # unterminated block
             "",                                         # empty document
-            "---\n: : : invalid{{\n---\n\nBody.\n",     # unparseable YAML
             "---\n- just a list\n- of items\n---\n\nBody.\n",  # non-dict YAML
         ):
             assert GitHubSource._parse_frontmatter_quick(content) == {}, repr(content)

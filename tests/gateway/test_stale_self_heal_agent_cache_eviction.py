@@ -4,7 +4,7 @@ Bug
 ---
 The #54878 self-heal (``SessionStore.get_or_create_session``) detects a
 routing key pointing at a session that state.db already marked ended, drops
-the stale ``sessions.json`` entry, and recovers/recreates a fresh session_id
+the stale routing entry, and recovers/recreates a fresh session_id
 under the SAME session_key.
 
 The #54947 fix (``gateway/run.py`` agent-cache cache-hit guard) treats "cached
@@ -196,5 +196,4 @@ class TestStaleSelfHealAgentCacheEviction:
 
         assert would_reuse is False
         assert evicted is True
-
 

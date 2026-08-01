@@ -71,8 +71,7 @@ class TestRewriteSkillRefsConsolidation:
         assert report["jobs_updated"] == 1
         loaded = get_job(job["id"])
         assert loaded["skills"] == ["umbrella-skill"]
-        # Legacy ``skill`` field realigned
-        assert loaded["skill"] == "umbrella-skill"
+        assert "skill" not in loaded
 
     def test_multiple_skills_one_consolidated(self, cron_env):
         from cron.jobs import create_job, get_job, rewrite_skill_refs
@@ -143,7 +142,7 @@ class TestRewriteSkillRefsPruning:
         assert report["jobs_updated"] == 1
         loaded = get_job(job["id"])
         assert loaded["skills"] == ["keep"]
-        assert loaded["skill"] == "keep"
+        assert "skill" not in loaded
 
     def test_all_skills_pruned_leaves_empty_list(self, cron_env):
         from cron.jobs import create_job, get_job, rewrite_skill_refs
@@ -153,7 +152,7 @@ class TestRewriteSkillRefsPruning:
 
         loaded = get_job(job["id"])
         assert loaded["skills"] == []
-        assert loaded["skill"] is None
+        assert "skill" not in loaded
 
 
 class TestRewriteSkillRefsMixed:
@@ -215,22 +214,19 @@ class TestRewriteSkillRefsMultipleJobs:
         assert get_job(j2["id"])["skills"] == ["untouched"]
         assert get_job(j3["id"])["skills"] == []
 
-    def test_legacy_skill_field_also_rewritten(self, cron_env):
-        """Old jobs may have the legacy single-skill ``skill`` field
-        set instead of ``skills``. Both paths should be rewritten."""
-        from cron.jobs import create_job, get_job, rewrite_skill_refs
+    def test_jobs_without_skills_list_are_ignored(self, cron_env):
+        """Only the canonical skills list participates in rewrites."""
+        from cron.jobs import JOBS_FILE, load_jobs, rewrite_skill_refs
+        import json
 
-        # Create via the legacy ``skill`` argument
-        job = create_job(
-            prompt="",
-            schedule="every 1h",
-            skill="legacy",
+        JOBS_FILE.write_text(
+            json.dumps({"jobs": [{"id": "legacy-only", "skill": "legacy"}]}),
+            encoding="utf-8",
         )
-        rewrite_skill_refs(consolidated={"legacy": "umbrella"}, pruned=[])
+        report = rewrite_skill_refs(consolidated={"legacy": "umbrella"}, pruned=[])
 
-        loaded = get_job(job["id"])
-        assert loaded["skills"] == ["umbrella"]
-        assert loaded["skill"] == "umbrella"
+        assert report["jobs_updated"] == 0
+        assert load_jobs()[0]["skills"] == []
 
 
 class TestRewriteSkillRefsPersistence:
@@ -246,7 +242,7 @@ class TestRewriteSkillRefsPersistence:
         # Read raw file contents
         data = json.loads(JOBS_FILE.read_text())
         assert data["jobs"][0]["skills"] == ["umbrella"]
-        assert data["jobs"][0]["skill"] == "umbrella"
+        assert "skill" not in data["jobs"][0]
 
     def test_noop_does_not_rewrite_file(self, cron_env):
         from cron.jobs import create_job, rewrite_skill_refs, JOBS_FILE

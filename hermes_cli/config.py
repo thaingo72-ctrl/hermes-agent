@@ -2818,31 +2818,9 @@ def _normalize_root_model_keys(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _normalize_max_turns_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize legacy root-level max_turns into agent.max_turns.
-
-    Only injects the schema default when the user actually set max_turns
-    somewhere (root level or under ``agent``).  A bare ``load_config()``
-    call that passes the result straight to ``save_config()`` should not
-    materialise ``agent.max_turns`` in config.yaml when the user never set
-    it — that makes the default sticky and blocks future schema changes.
-    """
+    """Drop obsolete root-level max_turns while retaining agent.max_turns."""
     config = dict(config)
     agent_config = dict(config.get("agent") or {})
-
-    had_root = "max_turns" in config
-    had_agent = "max_turns" in agent_config
-
-    if had_root and not had_agent:
-        agent_config["max_turns"] = config["max_turns"]
-
-    # Only inject the default when the user explicitly set max_turns
-    # (either root-level or under agent).  Otherwise leave it absent so
-    # save_config can omit it and the schema default fills in at runtime.
-    if not had_root and not had_agent:
-        pass  # deliberately do not inject DEFAULT_CONFIG default
-    elif "max_turns" not in agent_config:
-        agent_config["max_turns"] = DEFAULT_CONFIG["agent"]["max_turns"]
-
     config["agent"] = agent_config
     config.pop("max_turns", None)
     return config
@@ -3317,14 +3295,8 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
                 with open(config_path, encoding="utf-8") as f:
                     user_config = fast_safe_load(f) or {}
 
-                if "max_turns" in user_config:
-                    agent_user_config = dict(user_config.get("agent") or {})
-                    if agent_user_config.get("max_turns") is None:
-                        agent_user_config["max_turns"] = user_config["max_turns"]
-                    user_config["agent"] = agent_user_config
-                    user_config.pop("max_turns", None)
-
                 config = _deep_merge(config, user_config)
+                config.pop("max_turns", None)
             except Exception as e:
                 # Last-known-good fallback (port of openai/codex#31188's
                 # invariant: a parse failure in a policy/config file must not

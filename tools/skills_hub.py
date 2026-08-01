@@ -1175,18 +1175,10 @@ class GitHubSource(SkillSource):
     @staticmethod
     def _parse_frontmatter_quick(content: str) -> dict:
         """Parse YAML frontmatter from SKILL.md content."""
-        content = content.lstrip("\ufeff")  # tolerate UTF-8 BOM (Windows editors)
-        if not content.startswith("---"):
-            return {}
-        match = re.search(r'\n---\s*\n', content[3:])
-        if not match:
-            return {}
-        yaml_text = content[3:match.start() + 3]
-        try:
-            parsed = yaml.safe_load(yaml_text)
-            return parsed if isinstance(parsed, dict) else {}
-        except yaml.YAMLError:
-            return {}
+        from agent.skill_utils import parse_frontmatter
+
+        frontmatter, _body = parse_frontmatter(content)
+        return frontmatter
 
 
 # ---------------------------------------------------------------------------
@@ -3228,18 +3220,10 @@ class OptionalSkillSource(SkillSource):
     @staticmethod
     def _parse_frontmatter(content: str) -> dict:
         """Parse YAML frontmatter from SKILL.md content."""
-        content = content.lstrip("\ufeff")  # tolerate UTF-8 BOM (Windows editors)
-        if not content.startswith("---"):
-            return {}
-        match = re.search(r'\n---\s*\n', content[3:])
-        if not match:
-            return {}
-        yaml_text = content[3:match.start() + 3]
-        try:
-            parsed = yaml.safe_load(yaml_text)
-            return parsed if isinstance(parsed, dict) else {}
-        except yaml.YAMLError:
-            return {}
+        from agent.skill_utils import parse_frontmatter
+
+        frontmatter, _body = parse_frontmatter(content)
+        return frontmatter
 
 
 # ---------------------------------------------------------------------------

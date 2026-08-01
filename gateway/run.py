@@ -2708,22 +2708,10 @@ def _skill_slug_from_frontmatter(skill_md: Path) -> tuple[str | None, str | None
         content = skill_md.read_text(encoding="utf-8", errors="replace")
     except Exception:
         return None, None
-    content = content.lstrip("\ufeff")  # tolerate UTF-8 BOM (Windows editors)
-    if not content.startswith("---"):
-        return None, None
-    end = content.find("\n---", 3)
-    if end < 0:
-        return None, None
-    declared_name: str | None = None
-    for line in content[3:end].splitlines():
-        line = line.strip()
-        if line.startswith("name:"):
-            raw = line.split(":", 1)[1].strip()
-            # Strip YAML quote wrappers if present
-            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
-                raw = raw[1:-1]
-            declared_name = raw.strip()
-            break
+    from agent.skill_utils import parse_frontmatter
+
+    frontmatter, _body = parse_frontmatter(content)
+    declared_name = str(frontmatter.get("name") or "").strip() or None
     if not declared_name:
         return None, None
     slug = declared_name.lower().replace(" ", "-").replace("_", "-")
@@ -11509,8 +11497,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         self._clear_conversation_scope(
                             key, reason="expiry_finalized"
                         )
-                        # Persist the finalized flag to sessions.json AND
-                        # state.db (single write-path, #9006) — also drops
+                        # Persist the finalized flag to state.db — also drops
                         # the persisted /model override, since finalization
                         # is a conversation boundary.
                         await self.async_session_store.set_expiry_finalized(entry)
@@ -11568,7 +11555,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     logger.debug("Idle agent sweep failed: %s", _e)
 
                 # Periodically prune stale SessionStore entries.  The
-                # in-memory dict (and sessions.json) would otherwise grow
+                # in-memory routing dict would otherwise grow
                 # unbounded in gateways serving many rotating chats /
                 # threads / users over long time windows.  Pruning is
                 # invisible to users — a resumed session just gets a
@@ -22182,7 +22169,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             discord_tools = "1" if _discord_tools_loaded() else "0"
             discord_ids = (
-                str(src.guild_id or ""),
+                str(src.scope_id or ""),
                 str(src.parent_chat_id or ""),
                 str(src.thread_id or ""),
                 str(src.chat_id or ""),
@@ -23038,7 +23025,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             matched = match_profile_route(
                 routes,
                 platform=source.platform.value,
-                guild_id=getattr(source, "guild_id", None),
+                guild_id=getattr(source, "scope_id", None),
                 chat_id=source.chat_id,
                 thread_id=getattr(source, "thread_id", None),
                 parent_chat_id=getattr(source, "parent_chat_id", None),
@@ -23092,23 +23079,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Warn if an explicit profile doesn't exist on disk
             if explicit_profile and not profile_exists(name):
                 logger.warning(
-                    "Profile %r does not exist for source %s/%s (guild_id=%s), "
+                    "Profile %r does not exist for source %s/%s (scope_id=%s), "
                     "falling back to global HERMES_HOME",
                     explicit_profile,
                     source.platform.value,
                     source.chat_id,
-                    getattr(source, "guild_id", None),
+                    getattr(source, "scope_id", None),
                 )
                 return get_hermes_home()
             return profile_dir
         except Exception:
             # Catch normalization errors, path errors, etc.
             logger.warning(
-                "Failed to resolve profile directory for source %s/%s (guild_id=%s), "
+                "Failed to resolve profile directory for source %s/%s (scope_id=%s), "
                 "falling back to global HERMES_HOME: %s",
                 source.platform.value,
                 source.chat_id,
-                getattr(source, "guild_id", None),
+                getattr(source, "scope_id", None),
                 explicit_profile or "(no profile)",
                 exc_info=True,
             )

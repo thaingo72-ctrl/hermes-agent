@@ -2376,7 +2376,6 @@ DEFAULT_CONFIG = {
         # gateway_routing table). Default True for backward compatibility with
         # external tooling and downgrade safety; set to false to stop
         # producing ~/.hermes/sessions/sessions.json entirely.
-        "write_sessions_json": True,
 
         # Scale-to-zero idle detection (Phase 0). The gateway watches for idle
         # and, when an instance is opted in via the NAS "Labs" toggle (carried as

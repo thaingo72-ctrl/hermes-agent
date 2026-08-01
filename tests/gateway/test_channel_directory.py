@@ -137,45 +137,55 @@ class TestResolveChannelName:
 
 
 class TestBuildFromSessions:
-    def _write_sessions(self, tmp_path, sessions_data):
-        """Write sessions.json at the path _build_from_sessions expects."""
-        sessions_path = tmp_path / "sessions" / "sessions.json"
-        sessions_path.parent.mkdir(parents=True)
-        sessions_path.write_text(json.dumps(sessions_data))
+    def _mock_session_rows(self, rows):
+        mock_db = MagicMock()
+        mock_db.list_gateway_sessions.return_value = rows
+        return patch("hermes_state.SessionDB", return_value=mock_db), mock_db
 
-    def test_builds_from_sessions_json(self, tmp_path):
-        self._write_sessions(tmp_path, {
-            "session_1": {
-                "origin": {
+    def test_builds_from_state_db_sessions(self):
+        db_patch, mock_db = self._mock_session_rows([
+            {
+                "origin_json": json.dumps({
                     "platform": "telegram",
                     "chat_id": "12345",
                     "chat_name": "Alice",
-                },
+                }),
                 "chat_type": "dm",
             },
-            "session_2": {
-                "origin": {
+            {
+                "origin_json": json.dumps({
                     "platform": "telegram",
                     "chat_id": "67890",
                     "user_name": "Bob",
-                },
+                }),
                 "chat_type": "group",
             },
-            "session_3": {
-                "origin": {
-                    "platform": "discord",
-                    "chat_id": "99999",
-                },
-            },
-        })
+        ])
 
-        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+        with db_patch:
             entries = _build_from_sessions("telegram")
 
         assert len(entries) == 2
         names = {e["name"] for e in entries}
         assert "Alice" in names
         assert "Bob" in names
+        mock_db.close.assert_called_once()
+
+    def test_sessions_json_is_ignored_when_state_db_empty(self, tmp_path):
+        sessions_path = tmp_path / "sessions" / "sessions.json"
+        sessions_path.parent.mkdir(parents=True)
+        sessions_path.write_text(json.dumps({
+            "session_1": {
+                "origin": {"platform": "telegram", "chat_id": "12345", "chat_name": "Alice"},
+                "chat_type": "dm",
+            },
+        }))
+        db_patch, _mock_db = self._mock_session_rows([])
+
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}), db_patch:
+            entries = _build_from_sessions("telegram")
+
+        assert entries == []
 
 
 class TestFormatDirectoryForDisplay:
@@ -225,14 +235,20 @@ def _make_slack_client(pages):
 class TestBuildSlack:
     """_build_slack actually calls users.conversations on each workspace client."""
 
-    def test_no_team_clients_falls_back_to_sessions(self, tmp_path):
-        sessions_path = tmp_path / "sessions" / "sessions.json"
-        sessions_path.parent.mkdir(parents=True)
-        sessions_path.write_text(json.dumps({
-            "s1": {"origin": {"platform": "slack", "chat_id": "D123", "chat_name": "Alice"}},
-        }))
+    def test_no_team_clients_falls_back_to_state_db_sessions(self):
+        mock_db = MagicMock()
+        mock_db.list_gateway_sessions.return_value = [
+            {
+                "origin_json": json.dumps({
+                    "platform": "slack",
+                    "chat_id": "D123",
+                    "chat_name": "Alice",
+                }),
+                "chat_type": "dm",
+            }
+        ]
 
-        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+        with patch("hermes_state.SessionDB", return_value=mock_db):
             entries = asyncio.run(_build_slack(_make_slack_adapter({})))
 
         assert len(entries) == 1
@@ -316,4 +332,3 @@ class TestChannelAliases:
         names = [e["name"] for e in on_disk["platforms"]["whatsapp"]
                  if e["id"] == "120363@g.us"]
         assert names == ["general"]
-

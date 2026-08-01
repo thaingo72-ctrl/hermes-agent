@@ -202,18 +202,12 @@ def _read_skill_name(skill_md: Path, fallback: str) -> str:
         content = skill_md.read_text(encoding="utf-8", errors="replace")[:4000]
     except OSError:
         return fallback
-    in_frontmatter = False
-    for line in content.split("\n"):
-        stripped = line.strip()
-        if stripped == "---":
-            if in_frontmatter:
-                break
-            in_frontmatter = True
-            continue
-        if in_frontmatter and stripped.startswith("name:"):
-            value = stripped.split(":", 1)[1].strip().strip("\"'")
-            if value:
-                return value
+    from agent.skill_utils import parse_frontmatter
+
+    frontmatter, _body = parse_frontmatter(content)
+    value = str(frontmatter.get("name") or "").strip()
+    if value:
+        return value
     return fallback
 
 

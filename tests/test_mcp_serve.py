@@ -5,7 +5,7 @@ Three layers of tests:
 1. Unit tests — helpers, content extraction, attachment parsing
 2. EventBridge tests — queue mechanics, cursors, waiters, concurrency
 3. End-to-end tests — call actual MCP tools through FastMCP's tool manager
-   with real session data in SQLite and sessions.json
+   with real session data in SQLite
 """
 
 import asyncio
@@ -115,12 +115,6 @@ def sample_sessions():
     }
 
 
-@pytest.fixture
-def populated_sessions_dir(sessions_dir, sample_sessions):
-    (sessions_dir / "sessions.json").write_text(json.dumps(sample_sessions))
-    return sessions_dir
-
-
 def _create_test_db(db_path, session_id, messages):
     """Create a minimal SQLite DB mimicking hermes_state schema."""
     conn = sqlite3.connect(str(db_path))
@@ -168,7 +162,7 @@ def _create_test_db(db_path, session_id, messages):
 
 
 @pytest.fixture
-def mock_session_db(tmp_path, populated_sessions_dir):
+def mock_session_db(tmp_path, sample_sessions):
     """Create a real SQLite DB with test messages and wire it up."""
     db_path = tmp_path / "state.db"
     messages = [
@@ -203,6 +197,26 @@ def mock_session_db(tmp_path, populated_sessions_dir):
                     d["tool_calls"] = json.loads(d["tool_calls"])
                 result.append(d)
             return result
+
+        def list_gateway_sessions(self, active_only=True):
+            rows = []
+            for entry in sample_sessions.values():
+                rows.append({
+                    "id": entry["session_id"],
+                    "session_key": entry["session_key"],
+                    "source": entry["platform"],
+                    "chat_type": entry.get("chat_type"),
+                    "display_name": entry.get("display_name"),
+                    "origin_json": json.dumps(entry.get("origin", {})),
+                    "started_at": 1774785600,
+                    "last_active": 1774794600,
+                    "input_tokens": entry.get("input_tokens", 0),
+                    "output_tokens": entry.get("output_tokens", 0),
+                })
+            return rows
+
+        def close(self):
+            pass
 
     return TestSessionDB()
 
@@ -241,10 +255,9 @@ class _FakeFastMCP:
 
 
 @pytest.fixture
-def fake_mcp_server(populated_sessions_dir, mock_session_db, monkeypatch):
+def fake_mcp_server(mock_session_db, monkeypatch):
     import mcp_serve
 
-    monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: populated_sessions_dir)
     monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: mock_session_db)
     monkeypatch.setattr(mcp_serve, "_load_channel_directory", lambda: {})
     monkeypatch.setattr(mcp_serve, "_MCP_SERVER_AVAILABLE", True)
@@ -274,10 +287,11 @@ class TestHelpers:
 
 
 
-    def test_load_sessions_index_corrupt(self, sessions_dir, monkeypatch):
-        (sessions_dir / "sessions.json").write_text("not json!")
+    def test_load_sessions_index_ignores_stale_json_mirror(self, sessions_dir, monkeypatch, sample_sessions):
+        (sessions_dir / "sessions.json").write_text(json.dumps(sample_sessions))
         import mcp_serve
         monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: sessions_dir)
+        monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: None)
         assert mcp_serve._load_sessions_index() == {}
 
 
@@ -396,11 +410,10 @@ class TestEventBridge:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def mcp_server_e2e(populated_sessions_dir, mock_session_db, monkeypatch):
+def mcp_server_e2e(mock_session_db, monkeypatch):
     """Create a fully wired MCP server for E2E testing."""
     mcp = pytest.importorskip("mcp", reason="MCP SDK not installed")
     import mcp_serve
-    monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: populated_sessions_dir)
     monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: mock_session_db)
     monkeypatch.setattr(mcp_serve, "_load_channel_directory", lambda: {})
 
@@ -711,10 +724,9 @@ class TestToolRegistration:
 
 class TestServerCreation:
 
-    def test_create_with_bridge(self, populated_sessions_dir, monkeypatch):
+    def test_create_with_bridge(self, monkeypatch):
         pytest.importorskip("mcp", reason="MCP SDK not installed")
         import mcp_serve
-        monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: populated_sessions_dir)
         bridge = mcp_serve.EventBridge()
         assert mcp_serve.create_mcp_server(event_bridge=bridge) is not None
 
@@ -778,16 +790,22 @@ class TestCliIntegration:
 
 class TestEdgeCases:
 
-    def test_sessions_without_origin(self, sessions_dir, monkeypatch):
-        data = {"agent:main:telegram:dm:111": {
-            "session_key": "agent:main:telegram:dm:111",
-            "session_id": "20260329_120000_xyz",
-            "platform": "telegram",
-            "updated_at": "2026-03-29T12:00:00",
-        }}
-        (sessions_dir / "sessions.json").write_text(json.dumps(data))
+    def test_sessions_without_origin(self, monkeypatch):
         import mcp_serve
-        monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: sessions_dir)
+        row = {
+            "id": "20260329_120000_xyz",
+            "session_key": "agent:main:telegram:dm:111",
+            "source": "telegram",
+            "updated_at": "2026-03-29T12:00:00",
+        }
+        class TestDB:
+            def list_gateway_sessions(self, active_only=True):
+                return [row]
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: TestDB())
         entries = mcp_serve._load_sessions_index()
         assert entries["agent:main:telegram:dm:111"]["platform"] == "telegram"
 
@@ -811,17 +829,13 @@ class TestEventBridgePollE2E:
     """End-to-end tests for the EventBridge polling loop with real files."""
 
     def test_poll_detects_new_messages(self, tmp_path, monkeypatch):
-        """Write to SQLite + sessions.json, verify EventBridge picks it up."""
+        """Write to SQLite + state.db routing index, verify EventBridge picks it up."""
         import mcp_serve
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-        monkeypatch.setattr(mcp_serve, "_get_sessions_dir", lambda: sessions_dir)
 
         session_id = "20260329_150000_poll_test"
         db_path = tmp_path / "state.db"
 
-        # Write sessions.json
-        sessions_data = {
+        monkeypatch.setattr(mcp_serve, "_load_sessions_index", lambda: {
             "agent:main:telegram:dm:poll_test": {
                 "session_key": "agent:main:telegram:dm:poll_test",
                 "session_id": session_id,
@@ -831,8 +845,7 @@ class TestEventBridgePollE2E:
                 "updated_at": "2026-03-29T15:00:05",
                 "origin": {"platform": "telegram", "chat_id": "poll_test"},
             }
-        }
-        (sessions_dir / "sessions.json").write_text(json.dumps(sessions_data))
+        })
 
         # Write messages to SQLite
         messages = [
@@ -878,7 +891,7 @@ class TestEventBridgePollE2E:
         session_id = "20260329_150000_skip_test"
         db_path = tmp_path / "state.db"
 
-        sessions_data = {
+        monkeypatch.setattr(mcp_serve, "_load_sessions_index", lambda: {
             "agent:main:telegram:dm:skip": {
                 "session_key": "agent:main:telegram:dm:skip",
                 "session_id": session_id,
@@ -886,8 +899,7 @@ class TestEventBridgePollE2E:
                 "updated_at": "2026-03-29T15:00:05",
                 "origin": {"platform": "telegram", "chat_id": "skip"},
             }
-        }
-        (sessions_dir / "sessions.json").write_text(json.dumps(sessions_data))
+        })
         _create_test_db(db_path, session_id, [
             {"role": "user", "content": "Hello", "timestamp": "2026-03-29T15:00:01"},
         ])
@@ -930,7 +942,7 @@ class TestEventBridgePollE2E:
         Since #9006 the routing index lives IN state.db (session rows carry
         session_key/origin metadata), so a new conversation's registration and
         its first message land in the same file — a single mtime check covers
-        both and the old dual-file (sessions.json + state.db) race (#8925) is
+        both and the old dual-file routing/message race (#8925) is
         structurally impossible. This test asserts the index is refreshed on a
         db-mtime bump, so a conversation the bridge has never seen before is
         emitted on the same tick.
@@ -947,10 +959,9 @@ class TestEventBridgePollE2E:
         db_path.write_text("placeholder")
 
         session_id = "20260329_150000_late_register"
-        # The routing index now comes from _load_sessions_index() (state.db
-        # primary, sessions.json fallback). Stub it to return the new
-        # conversation, simulating the gateway having just written the
-        # session row + first message in one state.db transaction.
+        # The routing index now comes from state.db. Stub it to return the new
+        # conversation, simulating the gateway having just written the session
+        # row + first message in one state.db transaction.
         monkeypatch.setattr(
             mcp_serve, "_load_sessions_index",
             lambda: {
@@ -983,4 +994,3 @@ class TestEventBridgePollE2E:
         assert len(result["events"]) == 1
         assert result["events"][0]["session_key"] == "agent:main:telegram:dm:late"
         assert result["events"][0]["content"].startswith("Hello from a freshly")
-

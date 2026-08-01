@@ -88,6 +88,21 @@ def test_lazy_installable_extras_excluded_from_all():
         )
 
 
+def test_removed_noop_compatibility_extras_absent():
+    optional_dependencies = _load_optional_dependencies()
+    removed = {"cron", "vision", "pty", "nemo-relay"}
+
+    assert not (removed & set(optional_dependencies))
+    all_specs = optional_dependencies["all"]
+    termux_specs = optional_dependencies["termux"]
+    termux_all_specs = optional_dependencies["termux-all"]
+    specs = all_specs + termux_specs + termux_all_specs
+    assert not [
+        spec for spec in specs
+        if any(f"hermes-agent[{extra}]" in spec for extra in removed)
+    ]
+
+
 def _exact_pins(specs):
     pins = {}
     for spec in specs:

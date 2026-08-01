@@ -1,8 +1,7 @@
-"""Runtime self-heal for stale sessions.json routing entries (#54878).
+"""Runtime self-heal for stale in-memory routing entries (#54878).
 
 `_prune_stale_sessions_locked` only runs at gateway startup. A session ended
-in state.db while the gateway stays alive (e.g. any path that finalizes the
-row without clearing sessions.json) leaves a stale `session_key -> session_id`
+in state.db while the gateway stays alive leaves a stale `session_key -> session_id`
 mapping whose session has `end_reason` set. Before this fix,
 `get_or_create_session` returned that stale entry as a live routing key (it
 never consulted end_reason), so every subsequent message was silently routed
@@ -122,7 +121,7 @@ class TestRuntimeStaleGuard:
     ):
         """Stale `agent_close` entry + overdue reset policy → fresh session.
 
-        The #54878 self-healing path popped the stale sessions.json entry and
+        The #54878 self-healing path popped the stale routing entry and
         recovered the same session_id from the DB without checking whether a
         daily/idle reset was actually due.  This test guards the fix at
         gateway/session.py:1765 — when the session is overdue under the
@@ -186,5 +185,4 @@ class TestAdvanceCompressionSession:
         assert store.peek_session_id(key) == "sid_tip"
         db.end_session.assert_not_called()
         db.reopen_session.assert_not_called()
-
 

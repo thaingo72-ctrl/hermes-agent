@@ -97,7 +97,7 @@ uv venv ~/.hermes/venvs/hermes-dev --python 3.11
 export VIRTUAL_ENV="$HOME/.hermes/venvs/hermes-dev"
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# Install with all extras (messaging, cron, CLI menus, dev tools)
+# Install with all extras (messaging, CLI menus, dev tools)
 uv pip install -e ".[all,dev]"
 
 # Optional: browser tools

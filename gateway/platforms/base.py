@@ -6580,6 +6580,9 @@ class BasePlatformAdapter(ABC):
         in run.py) reads that field to enter ``_profile_runtime_scope`` for
         per-profile HERMES_HOME isolation.
         """
+        # Normalize adapter-boundary guild IDs into the platform-neutral scope.
+        normalized_scope_id = scope_id or guild_id
+
         # Normalize empty topic to None
         if chat_topic is not None and not chat_topic.strip():
             chat_topic = None
@@ -6602,8 +6605,7 @@ class BasePlatformAdapter(ABC):
                         user_id_alt=user_id_alt,
                         chat_id_alt=chat_id_alt,
                         is_bot=is_bot,
-                        scope_id=str(scope_id) if scope_id else None,
-                        guild_id=str(guild_id) if guild_id else None,
+                        scope_id=str(normalized_scope_id) if normalized_scope_id else None,
                         parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
                         message_id=str(message_id) if message_id else None,
                     )
@@ -6626,8 +6628,7 @@ class BasePlatformAdapter(ABC):
             user_id_alt=user_id_alt,
             chat_id_alt=chat_id_alt,
             is_bot=is_bot,
-            scope_id=str(scope_id) if scope_id else None,
-            guild_id=str(guild_id) if guild_id else None,
+            scope_id=str(normalized_scope_id) if normalized_scope_id else None,
             parent_chat_id=str(parent_chat_id) if parent_chat_id else None,
             message_id=str(message_id) if message_id else None,
             profile=profile,
