@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Set
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.secret_prompt import masked_secret_prompt
 
@@ -933,6 +935,100 @@ def _ensure_hermes_home_managed(home: Path):
 # =============================================================================
 
 from hermes_cli.config_defaults import DEFAULT_CONFIG, OPTIONAL_ENV_VARS  # noqa: F401
+
+
+_BOOL_TRUE_STRINGS = frozenset({"1", "true", "yes", "on"})
+_BOOL_FALSE_STRINGS = frozenset({"0", "false", "no", "off"})
+
+
+def _coerce_strict_int(value: Any) -> Any:
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.isdecimal() or (raw.startswith("-") and raw[1:].isdecimal()):
+            return int(raw, 10)
+    return value
+
+
+def _coerce_strict_bool(value: Any) -> Any:
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw in _BOOL_TRUE_STRINGS:
+            return True
+        if raw in _BOOL_FALSE_STRINGS:
+            return False
+    return value
+
+
+class _HermesConfigBase(BaseModel):
+    model_config = ConfigDict(extra="allow", strict=True)
+
+
+class ModelConfigModel(_HermesConfigBase):
+    default: str = ""
+    base_url: str = ""
+    provider: str = "auto"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_scalar_model(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"default": value, "base_url": "", "provider": "auto"}
+        return value
+
+    @model_validator(mode="after")
+    def _promote_legacy_model_key(self) -> "ModelConfigModel":
+        legacy_model = getattr(self, "model", None)
+        if not self.default and isinstance(legacy_model, str):
+            self.default = legacy_model
+        return self
+
+
+class AgentConfigModel(_HermesConfigBase):
+    max_turns: int = 500
+
+    @field_validator("max_turns", mode="before")
+    @classmethod
+    def _coerce_max_turns(cls, value: Any) -> Any:
+        return _coerce_strict_int(value)
+
+
+class GatewayProfileRouteModel(_HermesConfigBase):
+    name: str = ""
+    platform: str
+    profile: str
+    guild_id: Optional[str] = None
+    chat_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    enabled: bool = True
+
+    @field_validator("enabled", mode="before")
+    @classmethod
+    def _coerce_enabled(cls, value: Any) -> Any:
+        return _coerce_strict_bool(value)
+
+
+class GatewayConfigModel(_HermesConfigBase):
+    loop_watchdog: bool = True
+    max_concurrent_sessions: Optional[int] = None
+    systemd_watchdog_seconds: int = 0
+    multiplex_profiles: bool = False
+    profile_routes: List[GatewayProfileRouteModel] = Field(default_factory=list)
+
+    @field_validator("loop_watchdog", "multiplex_profiles", mode="before")
+    @classmethod
+    def _coerce_bools(cls, value: Any) -> Any:
+        return _coerce_strict_bool(value)
+
+    @field_validator("max_concurrent_sessions", "systemd_watchdog_seconds", mode="before")
+    @classmethod
+    def _coerce_ints(cls, value: Any) -> Any:
+        return _coerce_strict_int(value)
+
+
+class HermesConfigModel(_HermesConfigBase):
+    model: ModelConfigModel = Field(default_factory=ModelConfigModel)
+    agent: AgentConfigModel = Field(default_factory=AgentConfigModel)
+    gateway: GatewayConfigModel = Field(default_factory=GatewayConfigModel)
 
 # =============================================================================
 # Config Migration System
@@ -3142,6 +3238,100 @@ def load_config_readonly() -> Dict[str, Any]:
     safety guarantee is purely documented, not enforced — be careful.
     """
     return _load_config_impl(want_deepcopy=False)
+
+
+def _load_config_data_for_typed_model(
+    *,
+    include_user_config: bool,
+    include_defaults: bool = True,
+    config_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Return normalized, env-expanded config data for typed model validation."""
+    with _CONFIG_LOCK:
+        ensure_hermes_home()
+        config = copy.deepcopy(DEFAULT_CONFIG) if include_defaults else {}
+
+        config_path = config_path or get_config_path()
+        if include_user_config:
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    user_config = fast_safe_load(f) or {}
+            except FileNotFoundError:
+                user_config = {}
+            if user_config and not isinstance(user_config, dict):
+                user_config = {}
+            if user_config:
+                if "max_turns" in user_config:
+                    agent_user_config = dict(user_config.get("agent") or {})
+                    if agent_user_config.get("max_turns") is None:
+                        agent_user_config["max_turns"] = user_config["max_turns"]
+                    user_config["agent"] = agent_user_config
+                    user_config.pop("max_turns", None)
+                config = _deep_merge(config, user_config)
+
+        normalized = _normalize_root_model_keys(_normalize_max_turns_config(config))
+        expanded = _expand_env_vars(normalized)
+
+        from hermes_cli import managed_scope
+
+        managed_config = managed_scope.load_managed_config()
+        if managed_config:
+            expanded = _deep_merge(expanded, _expand_env_vars(managed_config))
+        return expanded
+
+
+def load_typed_config(
+    *, include_user_config: bool = True, config_path: Optional[Path] = None
+) -> HermesConfigModel:
+    """Load the canonical typed Hermes configuration model."""
+    data = _load_config_data_for_typed_model(
+        include_user_config=include_user_config,
+        config_path=config_path,
+    )
+    return HermesConfigModel.model_validate(data)
+
+
+def load_gateway_typed_config(
+    *, include_user_config: bool = True, config_path: Optional[Path] = None
+) -> GatewayConfigModel:
+    """Load only the canonical typed gateway slice.
+
+    Gateway startup validates only the gateway-owned slice so a typo in an
+    unrelated section (for example ``agent.max_turns``) cannot discard valid
+    gateway settings during a long-running messaging process.
+    """
+    data = _load_config_data_for_typed_model(
+        include_user_config=include_user_config,
+        config_path=config_path,
+    )
+    gateway_data = data.get("gateway") if isinstance(data.get("gateway"), dict) else {}
+    if not isinstance(gateway_data, dict):
+        gateway_data = {}
+    raw_data = read_user_config_raw(config_path) if include_user_config else {}
+    raw_gateway_data = (
+        raw_data.get("gateway") if isinstance(raw_data.get("gateway"), dict) else {}
+    )
+
+    merged: Dict[str, Any] = {}
+    for key in (
+        "loop_watchdog",
+        "max_concurrent_sessions",
+        "systemd_watchdog_seconds",
+        "multiplex_profiles",
+        "profile_routes",
+    ):
+        if key in raw_data:
+            merged[key] = data[key]
+        elif key in raw_gateway_data:
+            merged[key] = gateway_data[key]
+        elif key in data:
+            merged[key] = data[key]
+        elif key in gateway_data:
+            merged[key] = gateway_data[key]
+
+    for key, value in gateway_data.items():
+        merged.setdefault(key, value)
+    return GatewayConfigModel.model_validate(merged)
 
 
 def write_platform_config_field(

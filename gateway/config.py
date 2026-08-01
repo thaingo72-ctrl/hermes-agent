@@ -22,6 +22,22 @@ from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 
+_CANONICAL_TYPED_GATEWAY_KEYS = frozenset({
+    "loop_watchdog",
+    "max_concurrent_sessions",
+    "systemd_watchdog_seconds",
+    "multiplex_profiles",
+    "profile_routes",
+})
+
+
+def _canonical_typed_gateway_dump(typed_gateway_cfg: Any) -> dict:
+    return typed_gateway_cfg.model_dump(
+        mode="python",
+        exclude_none=True,
+        include=_CANONICAL_TYPED_GATEWAY_KEYS,
+    )
+
 
 def _coerce_bool(value: Any, default: bool = True) -> bool:
     """Coerce bool-ish config values, preserving a caller-provided default."""
@@ -1080,6 +1096,24 @@ class GatewayConfig:
                 for r in self.profile_routes
             ],
         }
+
+    def model_dump(self, *, mode: str = "python", **_: Any) -> Dict[str, Any]:
+        """Pydantic-compatible dump for the canonical gateway runtime config."""
+        data = self.to_dict()
+        if mode == "json":
+            # ``to_dict`` already stringifies Path/Enum leaves. json round-trip
+            # defensively proves no dataclass or Path instances remain.
+            return json.loads(json.dumps(data))
+        return data
+
+    @classmethod
+    def model_validate(cls, data: Any) -> "GatewayConfig":
+        """Pydantic-compatible validation entry point backed by from_dict."""
+        if isinstance(data, cls):
+            return data
+        if not isinstance(data, dict):
+            raise TypeError("GatewayConfig.model_validate expected a mapping")
+        return cls.from_dict(data)
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
@@ -1275,19 +1309,19 @@ def load_gateway_config() -> GatewayConfig:
 
     # Primary source: config.yaml
     try:
-        import yaml
-        config_yaml_path = _home / "config.yaml"
-        if config_yaml_path.exists():
-            with open(config_yaml_path, encoding="utf-8") as f:
-                yaml_cfg = yaml.safe_load(f) or {}
+        from hermes_cli.config import _load_config_data_for_typed_model, load_gateway_typed_config
 
-            # Managed scope: overlay administrator-pinned values so the gateway
-            # honors them too. This loader builds its own dict instead of going
-            # through hermes_cli.config.load_config, so without this a managed
-            # session_reset / quick_commands / stt / model would be ignored by
-            # the messaging gateway. Fail-open via the shared helper.
-            from hermes_cli import managed_scope
-            yaml_cfg = managed_scope.apply_managed_overlay(yaml_cfg)
+        typed_gateway_cfg = load_gateway_typed_config()
+        typed_gateway_data = _canonical_typed_gateway_dump(typed_gateway_cfg)
+        yaml_cfg = _load_config_data_for_typed_model(
+            include_user_config=True,
+            include_defaults=False,
+        )
+        if yaml_cfg:
+            gw_data.update(typed_gateway_data)
+            gateway_section = yaml_cfg.setdefault("gateway", {})
+            if isinstance(gateway_section, dict):
+                gateway_section.update(typed_gateway_data)
 
             # Shared nested-fallback source: settings meant to be top-level
             # keys are also accepted when a user nests them under `gateway:`
@@ -1730,6 +1764,8 @@ def load_gateway_config() -> GatewayConfig:
             # Feishu settings → env vars: migrated to the feishu plugin's
             # apply_yaml_config_fn hook (plugins/platforms/feishu/adapter.py).
             # #41112 / #3823.
+
+            gw_data.update(typed_gateway_data)
 
     except Exception as e:
         logger.warning(
