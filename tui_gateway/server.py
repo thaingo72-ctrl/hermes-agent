@@ -13185,6 +13185,7 @@ from . import (  # noqa: E402
     methods_billing as _methods_billing,
     methods_complete as _methods_complete,
     methods_config as _methods_config,
+    methods_operations as _methods_operations,
     methods_prompt as _methods_prompt,
     methods_session as _methods_session,
     methods_tools as _methods_tools,
@@ -13193,6 +13194,70 @@ from . import (  # noqa: E402
 _methods_billing.register(
     _methods,
     services=_methods_billing.default_billing_services(emit=_emit),
+)
+
+_methods_operations.register(
+    _methods,
+    services=_methods_operations.OperationsServices(
+        slash=_methods_operations.SlashOperationsServices(
+            sess_nowait=_sess_nowait,
+            live_slash_command_output=_live_slash_command_output,
+            command_dispatch=lambda rid, params: _methods["command.dispatch"](
+                rid, params
+            ),
+            resolve_model=_resolve_model,
+            worker_factory=lambda *args, **kwargs: _SlashWorker(*args, **kwargs),
+            attach_worker=_attach_worker,
+            mirror_slash_side_effects=_mirror_slash_side_effects,
+            sessions_lock=_sessions_lock,
+            make_lock=threading.Lock,
+            pending_input_commands=_PENDING_INPUT_COMMANDS,
+            worker_blocked_commands=_WORKER_BLOCKED_COMMANDS,
+            resolve_bundle_command_key=lambda name: __import__(
+                "agent.skill_bundles", fromlist=["resolve_bundle_command_key"]
+            ).resolve_bundle_command_key(name),
+            resolve_command=lambda name: __import__(
+                "hermes_cli.commands", fromlist=["resolve_command"]
+            ).resolve_command(name),
+            get_skill_commands=lambda: __import__(
+                "agent.skill_commands", fromlist=["get_skill_commands"]
+            ).get_skill_commands(),
+            get_plugin_command_handler=lambda name: __import__(
+                "hermes_cli.plugins", fromlist=["get_plugin_command_handler"]
+            ).get_plugin_command_handler(name),
+            resolve_plugin_command_result=lambda result: __import__(
+                "hermes_cli.plugins", fromlist=["resolve_plugin_command_result"]
+            ).resolve_plugin_command_result(result),
+        ),
+        insights=_methods_operations.InsightsOperationsServices(
+            get_db=_get_db,
+            db_unavailable_error=lambda rid: _db_unavailable_error(rid, code=5017),
+            time=time.time,
+        ),
+        rollback=_methods_operations.RollbackOperationsServices(
+            sess=_sess,
+            with_checkpoints=_with_checkpoints,
+            resolve_checkpoint_hash=_resolve_checkpoint_hash,
+            render_diff=render_diff,
+            sessions_lock=_sessions_lock,
+            make_lock=threading.Lock,
+        ),
+        shell=_methods_operations.ShellOperationsServices(
+            detect_hardline_command=lambda cmd: __import__(
+                "tools.approval", fromlist=["detect_hardline_command"]
+            ).detect_hardline_command(cmd),
+            detect_dangerous_command=lambda cmd: __import__(
+                "tools.approval", fromlist=["detect_dangerous_command"]
+            ).detect_dangerous_command(cmd),
+            subprocess_run=lambda *args, **kwargs: subprocess.run(*args, **kwargs),
+            timeout_expired=subprocess.TimeoutExpired,
+            devnull=subprocess.DEVNULL,
+            getcwd=os.getcwd,
+            windows_hide_flags=lambda: __import__(
+                "hermes_cli._subprocess_compat", fromlist=["windows_hide_flags"]
+            ).windows_hide_flags(),
+        ),
+    ),
 )
 
 for _m in (
