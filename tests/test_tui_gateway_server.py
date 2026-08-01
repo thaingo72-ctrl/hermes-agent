@@ -894,10 +894,19 @@ def test_write_json_serializes_concurrent_writes(monkeypatch):
     for t in threads:
         t.join()
 
-    lines = "".join(out.parts).splitlines()
+    raw = "".join(out.parts)
+    complete_frames, separator, _partial_frame = raw.rpartition("\n")
+    assert separator == "\n"
+    payloads = [json.loads(line) for line in complete_frames.splitlines()]
+    target_payloads = [payload for payload in payloads if "seq" in payload]
 
-    assert len(lines) == 8
-    assert {json.loads(line)["seq"] for line in lines} == set(range(8))
+    # The imported gateway owns background emitters, so an unrelated valid
+    # JSON-RPC event can arrive while this assertion is running, and another
+    # can begin after our worker threads have joined. Ignore only that final
+    # incomplete frame; every completed frame must parse as JSON. The eight
+    # writes under test must each arrive exactly once without interleaving.
+    assert len(target_payloads) == 8
+    assert {payload["seq"] for payload in target_payloads} == set(range(8))
 
 
 def test_write_json_returns_false_on_broken_pipe(monkeypatch):
