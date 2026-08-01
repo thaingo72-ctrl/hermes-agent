@@ -136,3 +136,37 @@ def test_os_normalized_paths_are_not_a_move(session, repo_with_worktree):
     terminal_tool.record_session_cwd(session["session_key"], str(repo) + os.sep)
 
     assert server._reconcile_session_cwd_from_terminal(session) is False
+
+
+def test_explicit_cwd_switch_cleans_old_environment_before_recording_new(
+    tmp_path, monkeypatch
+):
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    session = {"session_key": "sess-switch", "cwd": str(old), "source": "desktop"}
+    events: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(server, "_get_db", lambda: None)
+    monkeypatch.setattr(server, "_persist_session_git_meta", lambda *_a: None)
+
+    def cleanup(task_id: str) -> None:
+        events.append(("cleanup", task_id))
+        assert terminal_tool.get_session_cwd(task_id) == str(old)
+
+    def register(updated_session: dict) -> None:
+        events.append(("register", updated_session["session_key"]))
+        assert updated_session["cwd"] == str(new.resolve())
+        terminal_tool.record_session_cwd(
+            updated_session["session_key"], updated_session["cwd"]
+        )
+
+    terminal_tool.record_session_cwd("sess-switch", str(old))
+    monkeypatch.setattr(server, "_register_session_cwd", register)
+    monkeypatch.setattr(terminal_tool, "cleanup_vm", cleanup)
+
+    assert server._set_session_cwd(session, str(new)) == str(new.resolve())
+
+    assert events == [("cleanup", "sess-switch"), ("register", "sess-switch")]
+    assert terminal_tool.get_session_cwd("sess-switch") == str(new.resolve())

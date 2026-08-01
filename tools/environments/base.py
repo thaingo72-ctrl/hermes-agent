@@ -1163,6 +1163,7 @@ class BaseEnvironment(ABC):
             proc, timeout=effective_timeout, bounded_capture=bounded_capture
         )
         self._update_cwd(result)
+        result["final_cwd"] = self.cwd
 
         return result
 

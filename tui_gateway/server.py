@@ -2646,6 +2646,12 @@ def _set_session_cwd(session: dict, cwd: str) -> str:
     resolved = os.path.abspath(os.path.expanduser(cwd))
     if not os.path.isdir(resolved):
         raise ValueError(f"working directory does not exist: {cwd}")
+    try:
+        from tools import terminal_tool
+
+        terminal_tool.cleanup_vm(session["session_key"])
+    except Exception:
+        pass
     session["cwd"] = resolved
     # An explicit user choice — persist it as the workspace (and let a later
     # lazy row creation persist it too, not the launch-dir fallback).
@@ -2659,12 +2665,6 @@ def _set_session_cwd(session: dict, cwd: str) -> str:
                 logger.debug("failed to persist session cwd", exc_info=True)
     # Branch/repo-root probes are git subprocesses — capture them off the hot path.
     _persist_session_git_meta(session, resolved)
-    try:
-        from tools.terminal_tool import cleanup_vm
-
-        cleanup_vm(session["session_key"])
-    except Exception:
-        pass
     return resolved
 
 

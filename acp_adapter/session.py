@@ -149,10 +149,20 @@ def _clear_task_cwd(task_id: str) -> None:
     if not task_id:
         return
     try:
-        from tools.terminal_tool import clear_task_env_overrides
-        clear_task_env_overrides(task_id)
+        from tools.terminal_tool import teardown_session_runtime_cwd
+        teardown_session_runtime_cwd(task_id)
     except Exception:
         logger.debug("Failed to clear ACP task cwd override", exc_info=True)
+
+
+def _cleanup_task_environment(task_id: str) -> None:
+    if not task_id:
+        return
+    try:
+        from tools.terminal_tool import cleanup_vm
+        cleanup_vm(task_id)
+    except Exception:
+        logger.debug("Failed to cleanup ACP task environment", exc_info=True)
 
 
 @dataclass
@@ -349,6 +359,7 @@ class SessionManager:
         state = self.get_session(session_id)  # checks DB too
         if state is None:
             return None
+        _cleanup_task_environment(session_id)
         state.cwd = cwd
         _register_task_cwd(session_id, cwd)
         self._persist(state)
