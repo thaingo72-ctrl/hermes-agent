@@ -8898,7 +8898,9 @@ def _run_prompt_submit(
             # persist_user_message below stays the clean prompt, so no
             # scaffolding reaches the transcript. Cache-safe: annotating the
             # NEW turn never rewrites an already-sent message.
-            if reaction_notes := _pending_reaction_notes(session):
+            if reaction_notes := _methods_prompt.pending_reaction_notes(
+                session, _prompt_reaction_services
+            ):
                 if isinstance(run_message, str):
                     run_message = f"{reaction_notes}\n\n{run_message}"
                 elif isinstance(run_message, list):
@@ -11515,7 +11517,7 @@ def _browser_disconnect(rid) -> dict:
 
 
 # ── Split JSON-RPC handler modules ───────────────────────────────────
-# Billing, config, and completion register direct service-injected callables.
+# Billing, config, completion, and prompt register direct service-injected callables.
 # The remaining split modules still use method_ctx.py's legacy rebinding seam.
 from . import (  # noqa: E402
     methods_billing as _methods_billing,
@@ -11526,10 +11528,8 @@ from . import (  # noqa: E402
     methods_tools as _methods_tools,
 )
 
-_methods_billing.register(
-    _methods,
-    services=_methods_billing.default_billing_services(emit=_emit),
-)
+_billing_rpc_services = _methods_billing.default_billing_services(emit=_emit)
+_methods_billing.register(_methods, services=_billing_rpc_services)
 _completion_rpc_services = _methods_complete.CompletionServices(
     sessions=_sessions,
     hermes_home=lambda: _hermes_home,
@@ -11542,55 +11542,135 @@ _methods_complete.register(
     _methods,
     services=_completion_rpc_services,
 )
-_methods_config.register(
-    _methods,
-    services=_methods_config.ConfigServices(
-        ok=_ok,
-        err=_err,
-        hermes_home=_hermes_home,
-        sessions=_sessions,
-        sessions_lock=_sessions_lock,
-        detail_modes=_DETAIL_MODES,
-        detail_section_names=_DETAIL_SECTION_NAMES,
-        load_cfg=lambda: _load_cfg(),
-        load_cfg_raw=lambda: _load_cfg_raw(),
-        save_cfg=lambda cfg: _save_cfg(cfg),
-        write_config_key=lambda key, value: _write_config_key(key, value),
-        compute_mcp_rev=lambda: _methods_config.compute_mcp_rev(_load_cfg),
-        get_db=lambda: _get_db(),
-        completion_cwd=lambda params=None: _methods_complete._completion_cwd(
-            params,
-            _completion_rpc_services,
-        ),
-        git_branch_for_cwd=lambda cwd: _git_branch_for_cwd(cwd),
-        git_common_repo_root_for_cwd=lambda cwd: _git_common_repo_root_for_cwd(cwd),
-        resolve_cwd_git=lambda cwd: _resolve_cwd_git(cwd),
-        resolve_model=lambda: _resolve_model(),
-        load_service_tier=lambda: _load_service_tier(),
-        load_busy_input_mode=lambda: _load_busy_input_mode(),
-        load_approval_mode=lambda: _load_approval_mode(),
-        load_tool_progress_mode=lambda: _load_tool_progress_mode(),
-        coerce_statusbar=lambda raw: _coerce_statusbar(raw),
-        display_mouse_tracking=lambda display: _display_mouse_tracking(display),
-        apply_model_switch=lambda *a, **kw: _apply_model_switch(*a, **kw),
-        start_agent_build=lambda sid, session: _start_agent_build(sid, session),
-        wait_agent=lambda session, rid: _wait_agent(session, rid),
-        persist_live_session_runtime=lambda session: _persist_live_session_runtime(session),
-        session_info=lambda *a, **kw: _session_info(*a, **kw),
-        emit=lambda event, sid, payload: _emit(event, sid, payload),
-        broadcast_global_event=lambda event, payload=None: _broadcast_global_event(event, payload),
-        resolve_skin=lambda: resolve_skin(),
-        note_skin_broadcast=lambda: _note_skin_broadcast(),
-        validate_personality=lambda value, cfg=None: _validate_personality(value, cfg),
-        apply_personality_to_session=lambda sid, session, prompt, name: _apply_personality_to_session(
-            sid, session, prompt, name
-        ),
+_config_rpc_services = _methods_config.ConfigServices(
+    ok=_ok,
+    err=_err,
+    hermes_home=_hermes_home,
+    sessions=_sessions,
+    sessions_lock=_sessions_lock,
+    detail_modes=_DETAIL_MODES,
+    detail_section_names=_DETAIL_SECTION_NAMES,
+    load_cfg=lambda: _load_cfg(),
+    load_cfg_raw=lambda: _load_cfg_raw(),
+    save_cfg=lambda cfg: _save_cfg(cfg),
+    write_config_key=lambda key, value: _write_config_key(key, value),
+    compute_mcp_rev=lambda: _methods_config.compute_mcp_rev(_load_cfg),
+    get_db=lambda: _get_db(),
+    completion_cwd=lambda params=None: _methods_complete._completion_cwd(
+        params,
+        _completion_rpc_services,
     ),
+    git_branch_for_cwd=lambda cwd: _git_branch_for_cwd(cwd),
+    git_common_repo_root_for_cwd=lambda cwd: _git_common_repo_root_for_cwd(cwd),
+    resolve_cwd_git=lambda cwd: _resolve_cwd_git(cwd),
+    resolve_model=lambda: _resolve_model(),
+    load_service_tier=lambda: _load_service_tier(),
+    load_busy_input_mode=lambda: _load_busy_input_mode(),
+    load_approval_mode=lambda: _load_approval_mode(),
+    load_tool_progress_mode=lambda: _load_tool_progress_mode(),
+    coerce_statusbar=lambda raw: _coerce_statusbar(raw),
+    display_mouse_tracking=lambda display: _display_mouse_tracking(display),
+    apply_model_switch=lambda *a, **kw: _apply_model_switch(*a, **kw),
+    start_agent_build=lambda sid, session: _start_agent_build(sid, session),
+    wait_agent=lambda session, rid: _wait_agent(session, rid),
+    persist_live_session_runtime=lambda session: _persist_live_session_runtime(session),
+    session_info=lambda *a, **kw: _session_info(*a, **kw),
+    emit=lambda event, sid, payload: _emit(event, sid, payload),
+    broadcast_global_event=lambda event, payload=None: _broadcast_global_event(event, payload),
+    resolve_skin=lambda: resolve_skin(),
+    note_skin_broadcast=lambda: _note_skin_broadcast(),
+    validate_personality=lambda value, cfg=None: _validate_personality(value, cfg),
+    apply_personality_to_session=lambda sid, session, prompt, name: _apply_personality_to_session(
+        sid, session, prompt, name
+    ),
+)
+_methods_config.register(_methods, services=_config_rpc_services)
+
+_prompt_reaction_services = _methods_prompt.ReactionServices(
+    load_cfg=lambda: _load_cfg(),
+    session_db=lambda session: _session_db(session),
+)
+
+_prompt_submit_rpc_services = _methods_prompt.PromptSubmitServices(
+    sess_nowait=lambda params, rid: _sess_nowait(params, rid),
+    ok=lambda rid, result: _ok(rid, result),
+    err=lambda rid, code, msg: _err(rid, code, msg),
+    voice_mode_enabled=lambda: _voice_mode_enabled(),
+    tts_stream_stop=lambda *args, **kwargs: _tts_stream_stop(*args, **kwargs),
+    voice_emit=lambda event, payload=None: _voice_emit(event, payload),
+    ensure_active_session_slot=lambda sid, session: _ensure_active_session_slot(sid, session),
+    expand_skill_invocation_for_replay=lambda text, session_key: _expand_skill_invocation_for_replay(text, session_key),
+    load_dashboard_process_isolation_config=lambda: _load_dashboard_process_isolation_config(),
+    session_uses_compute_host=lambda session, cfg: _session_uses_compute_host(session, cfg),
+    handle_busy_submit=lambda *args, **kwargs: _handle_busy_submit(*args, **kwargs),
+    child_run_active=lambda session_key: _child_run_active(session_key),
+    get_db=lambda: _get_db(),
+    start_inflight_turn=lambda session, text: _start_inflight_turn(session, text),
+    submit_prompt_to_compute_host=lambda rid, sid, session, text: _submit_prompt_to_compute_host(rid, sid, session, text),
+    ensure_session_db_row=lambda session: _ensure_session_db_row(session),
+    persist_branch_seed=lambda session: _persist_branch_seed(session),
+    clear_inflight_turn=lambda session: _clear_inflight_turn(session),
+    start_agent_build=lambda sid, session: _start_agent_build(sid, session),
+    wait_agent_for_prompt=lambda session, rid, sid: _wait_agent_for_prompt(session, rid, sid),
+    emit_terminal_turn_error=lambda sid, session, message: _emit_terminal_turn_error(sid, session, message),
+    emit=lambda event, sid, payload=None: _emit(event, sid, payload),
+    session_info=lambda agent, session: _session_info(agent, session),
+    run_prompt_submit=lambda *args, **kwargs: _run_prompt_submit(*args, **kwargs),
+)
+_attachment_rpc_services = _methods_prompt.AttachmentServices(
+    sess=lambda params, rid: _sess(params, rid),
+    sess_nowait=lambda params, rid: _sess_nowait(params, rid),
+    ok=lambda rid, result: _ok(rid, result),
+    err=lambda rid, code, msg: _err(rid, code, msg),
+    session_images_dir=lambda session: _session_images_dir(session),
+    image_meta=lambda path: _image_meta(path),
+    decode_attach_base64=lambda *args, **kwargs: _decode_attach_base64(*args, **kwargs),
+    attach_bytes_max_bytes=lambda: _ATTACH_BYTES_MAX_BYTES,
+    allowed_image_extensions=lambda: _allowed_image_extensions(),
+    queue_attached_image=lambda *args, **kwargs: _queue_attached_image(*args, **kwargs),
+    sniff_image_ext=lambda img_bytes, filename: _sniff_image_ext(img_bytes, filename),
+    pdf_attach_max_bytes=lambda: _PDF_ATTACH_MAX_BYTES,
+    pdf_attach_max_pages=lambda: _PDF_ATTACH_MAX_PAGES,
+    stage_session_file_attachment=lambda *args, **kwargs: _stage_session_file_attachment(*args, **kwargs),
+    attachment_ref_path=lambda session, path: _attachment_ref_path(session, path),
+    format_ref_value=lambda value: _format_ref_value(value),
+)
+_background_rpc_services = _methods_prompt.BackgroundServices(
+    sess=lambda params, rid: _sess(params, rid),
+    ok=lambda rid, result: _ok(rid, result),
+    err=lambda rid, code, msg: _err(rid, code, msg),
+    session_cwd=lambda session: _session_cwd(session),
+    set_session_context=lambda *args, **kwargs: _set_session_context(*args, **kwargs),
+    clear_session_context=lambda tokens: _clear_session_context(tokens),
+    background_agent_kwargs=lambda agent, task_id: _background_agent_kwargs(agent, task_id),
+    preview_restart_history=lambda session: _preview_restart_history(session),
+    ephemeral_preview_agent_kwargs=lambda agent, task_id: _ephemeral_preview_agent_kwargs(agent, task_id),
+    preview_restart_callbacks=lambda parent, task_id: _preview_restart_callbacks(parent, task_id),
+    emit=lambda event, sid, payload=None: _emit(event, sid, payload),
+)
+_response_rpc_services = _methods_prompt.ResponseServices(
+    ok=lambda rid, result: _ok(rid, result),
+    err=lambda rid, code, msg: _err(rid, code, msg),
+    prompt_lock=_prompt_lock,
+    pending=_pending,
+    answers=_answers,
+)
+_approval_rpc_services = _methods_prompt.ApprovalServices(
+    sess=lambda params, rid: _sess(params, rid),
+    ok=lambda rid, result: _ok(rid, result),
+    err=lambda rid, code, msg: _err(rid, code, msg),
+)
+_methods_prompt.register(
+    _methods,
+    prompt_submit_services=_prompt_submit_rpc_services,
+    attachment_services=_attachment_rpc_services,
+    background_services=_background_rpc_services,
+    response_services=_response_rpc_services,
+    approval_services=_approval_rpc_services,
 )
 
 for _m in (
     _methods_session,
-    _methods_prompt,
     _methods_tools,
 ):
     _m.register(sys.modules[__name__])
