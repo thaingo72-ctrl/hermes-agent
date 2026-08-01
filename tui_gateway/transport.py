@@ -130,57 +130,61 @@ class StdioTransport:
             on Windows).  Other OSError errnos (ENOSPC, EACCES, ...) are
             real host problems and re-raise.
         """
-        # Serialization is OUTSIDE the lock so a large payload can't
-        # block other threads emitting their own frames.  A non-JSON-safe
-        # payload is a programming error: re-raise so the crash log
-        # captures it instead of silently exiting via the False path.
-        line = json.dumps(obj, ensure_ascii=False) + "\n"
+        return write_json_frame(obj, self._stream_getter(), self._lock)
 
-        with self._lock:
-            stream = self._stream_getter()
+    def close(self) -> None:
+        return None
+
+
+def write_json_frame(obj: dict, stream: Any, lock: threading.Lock) -> bool:
+    """Write one newline-delimited JSON frame to an explicit output sink."""
+    # Serialization is OUTSIDE the lock so a large payload can't
+    # block other threads emitting their own frames.  A non-JSON-safe
+    # payload is a programming error: re-raise so the crash log
+    # captures it instead of silently exiting via the False path.
+    line = json.dumps(obj, ensure_ascii=False) + "\n"
+
+    with lock:
+        try:
+            stream.write(line)
+        except BrokenPipeError:
+            return False
+        except ValueError as e:
+            # ValueError("I/O operation on closed file") is the
+            # ONLY ValueError that means "peer gone".  Anything
+            # else — including UnicodeEncodeError, which is a
+            # ValueError subclass for misconfigured locales —
+            # is a real bug; re-raise so it surfaces in the crash log.
+            if isinstance(e, UnicodeEncodeError) or "closed file" not in str(e):
+                raise
+            return False
+        except OSError as e:
+            if e.errno not in _PEER_GONE_ERRNOS:
+                raise
+            logger.debug("StdioTransport write peer gone: %s", e)
+            return False
+
+        # A flush that *raises* with a peer-gone errno means the
+        # dispatcher should exit cleanly.  A flush that *hangs* on
+        # a half-closed pipe holds the lock until it returns — see
+        # ``_DISABLE_FLUSH`` for the "skip flush entirely" escape
+        # hatch.
+        if not _DISABLE_FLUSH:
             try:
-                stream.write(line)
+                stream.flush()
             except BrokenPipeError:
                 return False
             except ValueError as e:
-                # ValueError("I/O operation on closed file") is the
-                # ONLY ValueError that means "peer gone".  Anything
-                # else — including UnicodeEncodeError, which is a
-                # ValueError subclass for misconfigured locales —
-                # is a real bug; re-raise so it surfaces in the crash log.
                 if isinstance(e, UnicodeEncodeError) or "closed file" not in str(e):
                     raise
                 return False
             except OSError as e:
                 if e.errno not in _PEER_GONE_ERRNOS:
                     raise
-                logger.debug("StdioTransport write peer gone: %s", e)
+                logger.debug("StdioTransport flush peer gone: %s", e)
                 return False
 
-            # A flush that *raises* with a peer-gone errno means the
-            # dispatcher should exit cleanly.  A flush that *hangs* on
-            # a half-closed pipe holds the lock until it returns — see
-            # ``_DISABLE_FLUSH`` for the "skip flush entirely" escape
-            # hatch.
-            if not _DISABLE_FLUSH:
-                try:
-                    stream.flush()
-                except BrokenPipeError:
-                    return False
-                except ValueError as e:
-                    if isinstance(e, UnicodeEncodeError) or "closed file" not in str(e):
-                        raise
-                    return False
-                except OSError as e:
-                    if e.errno not in _PEER_GONE_ERRNOS:
-                        raise
-                    logger.debug("StdioTransport flush peer gone: %s", e)
-                    return False
-
-        return True
-
-    def close(self) -> None:
-        return None
+    return True
 
 
 class TeeTransport:
