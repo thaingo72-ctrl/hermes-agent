@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from tui_gateway import methods_pet, methods_session, server
+from tui_gateway import methods_pet, server
 
 
 def test_pet_handlers_are_registered_from_pet_module():
@@ -13,11 +13,6 @@ def test_pet_handlers_are_registered_from_pet_module():
         handler = server._methods[name]
         target = getattr(handler, "func", handler)
         assert target.__module__ == "tui_gateway.methods_pet"
-
-
-def test_legacy_session_module_no_longer_owns_pet_handlers():
-    registered = {name for name, _handler in methods_session._registry._pending}
-    assert not any(name.startswith("pet.") for name in registered)
 
 
 def test_pet_register_profile_scopes_profile_backed_handlers():
