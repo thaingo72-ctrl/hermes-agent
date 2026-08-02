@@ -1,8 +1,10 @@
-"""Stdlib document-to-text extraction for ``read_file``.
+"""Document-to-text extraction for ``read_file``.
 
-Supports Jupyter notebooks, DOCX, and XLSX without adding hard dependencies.
-Malformed documents raise :class:`ExtractionError`; callers can then fall back to
-normal text/binary handling.
+Supports Jupyter notebooks, DOCX, and XLSX with the standard library. PDFs use
+the optional ``pdf-inspector`` package so native text can be extracted before
+the caller chooses an OCR fallback. Malformed documents raise
+:class:`ExtractionError`; callers can then fall back to normal text/binary
+handling where appropriate.
 """
 
 from __future__ import annotations
@@ -13,9 +15,15 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-__all__ = ["EXTRACTABLE_EXTENSIONS", "ExtractionError", "extract_document_text", "is_extractable_document"]
+__all__ = [
+    "EXTRACTABLE_EXTENSIONS",
+    "ExtractionError",
+    "OcrRequiredError",
+    "extract_document_text",
+    "is_extractable_document",
+]
 
-EXTRACTABLE_EXTENSIONS = frozenset({".ipynb", ".docx", ".xlsx"})
+EXTRACTABLE_EXTENSIONS = frozenset({".ipynb", ".docx", ".xlsx", ".pdf"})
 MAX_XLSX_BYTES = 50 * 1024 * 1024
 _MAX_XLSX_ROWS_PER_SHEET = 5000
 _MAX_XLSX_COLS = 256
@@ -30,6 +38,10 @@ class ExtractionError(Exception):
     """Raised when a supported-looking document cannot be rendered as text."""
 
 
+class OcrRequiredError(ExtractionError):
+    """Raised when a PDF has no native text and must be routed to OCR."""
+
+
 def _extension(path: str) -> str:
     ext = Path(path).suffix.lower()
     return ext if ext in EXTRACTABLE_EXTENSIONS else ""
@@ -41,6 +53,8 @@ def is_extractable_document(path: str) -> bool:
 
 def extract_document_text(path: str) -> str:
     ext = _extension(path)
+    if ext == ".pdf":
+        return _extract_pdf(path)
     if ext == ".ipynb":
         return _extract_notebook(path)
     if ext == ".docx":
@@ -48,6 +62,38 @@ def extract_document_text(path: str) -> str:
     if ext == ".xlsx":
         return _extract_xlsx(path)
     raise ExtractionError(f"Unsupported document type: {path!r}")
+
+
+def _extract_pdf(path: str) -> str:
+    from tools import lazy_deps
+
+    try:
+        lazy_deps.ensure("documents.pdf", prompt=False)
+        import pdf_inspector
+    except (lazy_deps.FeatureUnavailable, ImportError) as exc:
+        raise ExtractionError(f"PDF extraction unavailable: {exc}") from exc
+
+    try:
+        result = pdf_inspector.process_pdf(path)
+    except Exception as exc:
+        raise ExtractionError(f"PDF extraction failed: {exc}") from exc
+
+    markdown = getattr(result, "markdown", None)
+    pages = getattr(result, "pages_needing_ocr", None) or []
+    if not isinstance(markdown, str) or not markdown.strip():
+        pdf_type = getattr(result, "pdf_type", "unknown")
+        page_hint = f"; pages needing OCR: {', '.join(map(str, pages))}" if pages else ""
+        raise OcrRequiredError(f"PDF requires OCR ({pdf_type}{page_hint})")
+    markdown = markdown.rstrip("\n") + "\n"
+    notes = []
+    if pages:
+        page_list = ", ".join(map(str, pages))
+        notes.append(f"Pages requiring OCR: {page_list}")
+    if getattr(result, "has_encoding_issues", False):
+        notes.append("Encoding issues detected; OCR fallback recommended")
+    if notes:
+        markdown = "\n".join(f"> {note}" for note in notes) + f"\n\n{markdown}"
+    return markdown
 
 
 def _source_text(source) -> str:
