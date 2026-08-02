@@ -17,6 +17,21 @@ def _load_package_data():
     return tool["setuptools"]["package-data"]
 
 
+def test_pdf_inspector_is_pinned_for_lazy_local_pdf_extraction():
+    optional_dependencies = _load_optional_dependencies()
+    from tools.lazy_deps import LAZY_DEPS
+
+    assert optional_dependencies["pdf"] == ["pdf-inspector==0.2.6"]
+    assert "pdf-inspector==0.2.6" in optional_dependencies["dev"]
+    assert LAZY_DEPS["documents.pdf"] == ("pdf-inspector==0.2.6",)
+    assert not any("hermes-agent[pdf]" in spec for spec in optional_dependencies["all"])
+
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    with pyproject_path.open("rb") as handle:
+        uv_config = tomllib.load(handle)["tool"]["uv"]
+    assert uv_config["exclude-newer-package"]["pdf-inspector"] is False
+
+
 def test_matrix_extra_not_in_all():
     """The [matrix] extra pulls `mautrix[encryption]` -> `python-olm`,
     which has Linux-only wheels and no native build path on Windows or
@@ -66,6 +81,7 @@ def test_lazy_installable_extras_excluded_from_all():
     lazy_covered_extras = {
         "anthropic", "bedrock",
         "exa", "firecrawl", "parallel-web",
+        "pdf",
         "fal",
         "edge-tts", "tts-premium",
         "voice",  # faster-whisper / sounddevice / numpy

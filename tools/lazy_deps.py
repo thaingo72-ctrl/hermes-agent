@@ -119,6 +119,9 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     "search.firecrawl": ("firecrawl-py==4.17.0",),
     "search.parallel": ("parallel-web==0.4.2",),
 
+    # ─── Local document extraction ──────────────────────────────────────────
+    "documents.pdf": ("pdf-inspector==0.2.6",),
+
     # ─── Monitoring ─────────────────────────────────────────────────────────
     # OTLP gateway monitoring export. Lazily installed on first use of
     # monitoring.gateway_health_export / monitoring.export.otlp. Tracks the
