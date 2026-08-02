@@ -1124,15 +1124,34 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         _resolved = _resolve_path_for_task(path, task_id)
 
+        # ── Hermes internal path guard ────────────────────────────────
+        # Apply before structured extraction so document parsers cannot bypass
+        # the same prompt-injection and credential-store denylist enforced for
+        # ordinary text reads. Pass the already-resolved path because the task
+        # cwd can differ from the Python process cwd.
+        block_error = get_read_block_error(str(_resolved))
+        if block_error:
+            return tool_error(block_error)
+
         # ── Structured-document extraction ────────────────────────────
-        # Try before the binary-extension guard so .docx/.xlsx can render as text.
-        # Malformed documents fall through to the normal path/binary guard.
-        from tools.read_extract import ExtractionError, extract_document_text, is_extractable_document
+        # Try before the binary-extension guard so structured files can render
+        # as text. Malformed Office documents fall through to the normal binary
+        # guard; PDF extraction and OCR-routing errors are returned directly.
+        from tools.read_extract import (
+            ExtractionError,
+            OcrRequiredError,
+            extract_document_text,
+            is_extractable_document,
+        )
 
         if is_extractable_document(str(_resolved)):
             try:
                 extracted_text = extract_document_text(str(_resolved))
-            except ExtractionError:
+            except OcrRequiredError as exc:
+                return tool_error(str(exc), path=path, requires_ocr=True)
+            except ExtractionError as exc:
+                if _resolved.suffix.lower() == ".pdf":
+                    return tool_error(str(exc), path=path)
                 logger.debug("document extraction failed for %s", path, exc_info=True)
             else:
                 file_ops = _get_file_ops(task_id)
@@ -1191,17 +1210,6 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                 f"Cannot read binary file '{path}' ({_ext}). "
                 "Use vision_analyze for images, or terminal to inspect binary files."
             )
-
-        # ── Hermes internal path guard ────────────────────────────────
-        # Prevent prompt injection via catalog or hub metadata files,
-        # and block credential stores under HERMES_HOME.  Pass the
-        # already-resolved path so a relative-path read against
-        # TERMINAL_CWD == HERMES_HOME (e.g. "auth.json") still hits the
-        # denylist — get_read_block_error's own resolve() runs against
-        # the Python process cwd, which can differ.
-        block_error = get_read_block_error(str(_resolved))
-        if block_error:
-            return tool_error(block_error)
 
         # ── Dedup check ───────────────────────────────────────────────
         # If we already read this exact (path, offset, limit) and the
@@ -1937,7 +1945,7 @@ def _check_file_reqs():
 
 READ_FILE_SCHEMA = {
     "name": "read_file",
-    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are truncated on a line boundary and return a next_offset; continue with offset to read the rest. Jupyter notebooks (.ipynb), Word documents (.docx), and Excel workbooks (.xlsx) are auto-extracted to readable text. NOTE: Cannot read images or other binary files — use vision_analyze for images.",
+    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are truncated on a line boundary and return a next_offset; continue with offset to read the rest. Native-text PDFs (.pdf), Jupyter notebooks (.ipynb), Word documents (.docx), and Excel workbooks (.xlsx) are auto-extracted to readable text; scanned PDF pages are identified for OCR. NOTE: Cannot read images or other binary files — use vision_analyze for images.",
     "parameters": {
         "type": "object",
         "properties": {
