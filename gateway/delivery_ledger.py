@@ -193,10 +193,22 @@ def record_obligation(
     chat_id: str,
     thread_id: Optional[str],
     content: str,
+    external_owner: bool = False,
 ) -> None:
-    """Record a final response as owed to the platform (state='pending')."""
+    """Record a final response as owed to the platform (state='pending').
+
+    ``external_owner=True`` stores the row WITHOUT an owner stamp (NULL pid),
+    marking it as produced by a foreign process (e.g. the desktop/TUI backend
+    continuing a session bound to this gateway's platform).  ``_owner_alive``
+    treats a NULL pid as dead, so any gateway can claim these rows with the
+    regular sweep — replies generated on non-gateway surfaces still reach the
+    bound chat (#76767).
+    """
     now = time.time()
-    pid, started = _owner_stamp()
+    if external_owner:
+        pid, started = None, None
+    else:
+        pid, started = _owner_stamp()
     with _DB_LOCK, _transaction() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO delivery_obligations

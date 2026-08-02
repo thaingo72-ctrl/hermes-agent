@@ -10102,11 +10102,38 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
 
+    async def _delivery_watcher(self, interval: float = 5.0) -> None:
+        """Deliver obligations recorded by foreign (non-gateway) processes.
+
+        The desktop/TUI backend runs the agent in its own process when a
+        session bound to this gateway's platform is continued from the
+        desktop app.  It records the final response as an EXTERNAL delivery
+        obligation (NULL owner) in the shared ledger; ``sweep_recoverable``
+        treats NULL-owner rows as claimable, so this watcher picks them up
+        and sends them to the bound chat — the gap where replies rendered on
+        desktop never reached Telegram (#76767).
+
+        Also claims crash-recovery rows whose owner died since the last tick,
+        so redelivery no longer waits for the next gateway boot.
+        """
+        # Initial delay so adapters finish connecting before the first claim.
+        await asyncio.sleep(5)
+        while self._running:
+            try:
+                await self._redeliver_pending_obligations()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("delivery watcher tick error: %s", exc, exc_info=True)
+            await asyncio.sleep(interval)
+
     async def _redeliver_pending_obligations(self) -> int:
         """Redeliver final responses recorded in the delivery ledger by a
-        previous (now dead) gateway process.
+        previous (now dead) gateway process or by a foreign process
+        (desktop/TUI backend continuing a gateway-bound session).
 
-        Runs at startup BEFORE ``_schedule_resume_pending_sessions``. A
+        Runs at startup BEFORE ``_schedule_resume_pending_sessions`` and is
+        also ticked periodically by :meth:`_delivery_watcher`. A
         session with a recoverable obligation already produced its answer —
         the turn completed and only delivery is owed — so this method sends
         the stored text and clears ``resume_pending`` for that session,
@@ -11283,6 +11310,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # destination platform's home channel, then forges a synthetic user
         # turn so the agent kicks off the new chat.
         self._spawn_supervised(self._handoff_watcher, "handoff_watcher")
+
+        # Start background delivery watcher — claims external delivery
+        # obligations (recorded by the desktop/TUI backend for sessions it
+        # continued that are bound to this gateway's platforms) and sends
+        # them, so replies generated outside the gateway still reach the
+        # original chat (#76767).  The startup sweep only redelivers rows
+        # owned by dead processes; this watcher keeps foreign-owned rows
+        # flowing while the gateway runs.
+        self._spawn_supervised(self._delivery_watcher, "delivery_watcher")
 
         # Start background async-delegation watcher — drains completion events
         # from delegate_task(background=true) subagents and injects each
