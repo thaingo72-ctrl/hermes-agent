@@ -5,6 +5,9 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 **Never give up on the right solution.**
 
 - Choose the simplest implementation that fully meets the current requirements.
+- Build in layers: start with the smallest end-to-end version that keeps the
+  product working, then add capabilities on top of verified behavior; do not
+  trade a working product for unfinished complexity.
 - Prefer established, well-maintained libraries over custom implementations.
 - Make architectural decisions for the long term. Do not accept a stopgap that
   only works for now and is meant to be replaced later.
