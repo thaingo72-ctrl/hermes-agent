@@ -9311,6 +9311,84 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
+def _record_bound_platform_delivery(session: dict, content: Any) -> None:
+    """Record a delivery obligation for a reply generated on a gateway-bound
+    session via the desktop/TUI backend.
+
+    When a Telegram (or other gateway-platform) session is resumed/viewed from
+    the desktop app, the agent runs in THIS backend process (web_server), not
+    in the gateway process.  The reply is persisted to state.db — the desktop
+    renders it — but the gateway never learns of it, so nothing is delivered
+    to the bound chat and ``delivery_obligations`` stays empty (#76767).
+
+    Read the stored session row's gateway origin (``session_key``/``chat_id``/
+    ``thread_id``) and record an EXTERNAL-owner obligation: the gateway's
+    delivery sweep claims NULL-owner rows and sends them to the bound
+    platform, so the reply reaches the original chat.
+    """
+    text = str(content or "").strip()
+    if not text:
+        return
+    key = str(session.get("session_key") or "")
+    if not key:
+        return
+    try:
+        from gateway.delivery_ledger import (
+            compute_obligation_id,
+            ledger_enabled,
+            record_obligation,
+        )
+
+        if not ledger_enabled():
+            return
+        with _session_db(session) as db:
+            if db is None:
+                return
+            row = db.get_session(key)
+            if row:
+                gateway_key = str(row.get("session_key") or "")
+                platform = str(row.get("source") or "")
+                chat_id = str(row.get("chat_id") or "")
+                thread_id = row.get("thread_id")
+                # Stable per-turn message ref: the last persisted assistant
+                # row id (distinguishes turns in one session, like the
+                # gateway's inbound message id).
+                message_ref = ""
+                try:
+                    for m in reversed(db.get_messages(key, limit=100)):
+                        if m.get("role") == "assistant" and m.get("id"):
+                            message_ref = str(m["id"])
+                            break
+                except Exception:
+                    message_ref = ""
+        # Only gateway-bound sessions carry a gateway session_key
+        # (``agent:...:<platform>:...``) plus a real chat id.
+        if not gateway_key or not gateway_key.startswith("agent:"):
+            return
+        if not platform or not chat_id:
+            return
+        if not message_ref:
+            message_ref = f"desktop:{int(time.time())}"
+        obligation_id = compute_obligation_id(
+            gateway_key, message_ref, text
+        )
+        record_obligation(
+            obligation_id=obligation_id,
+            session_key=gateway_key,
+            platform=platform,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            content=text,
+            external_owner=True,
+        )
+        logger.info(
+            "[tui_gateway] recorded delivery obligation for bound session %s -> %s:%s",
+            key, platform, chat_id,
+        )
+    except Exception:
+        logger.debug("bound-platform delivery obligation failed", exc_info=True)
+
+
 def _run_prompt_submit(
     rid,
     sid: str,
@@ -9830,6 +9908,15 @@ def _run_prompt_submit(
                 payload["recoverable"] = True
             _retire_turn_marker(session, marker_key)
             _emit("message.complete", sid, payload)
+
+            # A reply generated on a session bound to a gateway platform
+            # (e.g. Telegram) must still reach that chat.  The desktop/TUI
+            # backend runs the agent in THIS process — the gateway never sees
+            # the turn, so no delivery obligation would be created and the
+            # reply would stay desktop-only (#76767).  Record an external
+            # obligation the gateway's delivery sweep claims and sends.
+            if status == "complete" and isinstance(raw, str) and raw.strip():
+                _record_bound_platform_delivery(session, raw)
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
