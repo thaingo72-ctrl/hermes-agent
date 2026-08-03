@@ -313,6 +313,42 @@ class TestPlatformReconnectWatcher:
         assert info["next_retry"] != float("inf")
         assert info["next_retry"] > time.monotonic()
 
+    @pytest.mark.asyncio
+    async def test_telegram_reconnect_failure_retries_within_30_seconds(self):
+        """A recovered Telegram path must not sit idle for the generic 5-minute cap.
+
+        Each Telegram connect cycle is already internally bounded and retried.
+        After that cycle fails, the gateway should schedule the next outer attempt
+        within 30 seconds so display/VNC activity is not needed for prompt recovery.
+        """
+        runner = _make_runner()
+        runner._failed_platforms[Platform.TELEGRAM] = {
+            "config": PlatformConfig(enabled=True, token="test"),
+            "attempts": 25,
+            "next_retry": 999.0,
+        }
+
+        fail_adapter = StubAdapter(
+            succeed=False, fatal_error="network timeout", fatal_retryable=True
+        )
+        real_sleep = asyncio.sleep
+
+        with patch.object(runner, "_create_adapter", return_value=fail_adapter):
+            with patch("gateway.run.time.monotonic", return_value=1000.0):
+                call_count = 0
+
+                async def fake_sleep(_seconds):
+                    nonlocal call_count
+                    call_count += 1
+                    if call_count > 1:
+                        runner._running = False
+                    await real_sleep(0)
+
+                with patch("asyncio.sleep", side_effect=fake_sleep):
+                    await runner._platform_reconnect_watcher()
+
+        assert runner._failed_platforms[Platform.TELEGRAM]["next_retry"] == 1030.0
+
 
 # --- Runtime disconnection queueing ---
 
