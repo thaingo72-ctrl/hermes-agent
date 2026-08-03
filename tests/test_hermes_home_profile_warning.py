@@ -26,6 +26,7 @@ def fresh_constants(monkeypatch, tmp_path):
     importlib.reload(hermes_constants)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.delenv("HERMES_TEST_SANDBOX", raising=False)
     return hermes_constants
 
 
