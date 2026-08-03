@@ -58,10 +58,9 @@ if str(PROJECT_ROOT) not in sys.path:
 # would silently stop protecting the operator's actual ~/.hermes (#69385).
 _PRE_SANDBOX_KANBAN_OVERRIDE = os.environ.get("HERMES_KANBAN_HOME", "").strip()
 _PRE_SANDBOX_HERMES_HOME = os.environ.get("HERMES_HOME", "")
-if not os.environ.get("HERMES_HOME"):
-    _SESSION_HERMES_HOME = tempfile.mkdtemp(prefix="hermes-test-home-")
-    os.environ["HERMES_HOME"] = _SESSION_HERMES_HOME
-    atexit.register(shutil.rmtree, _SESSION_HERMES_HOME, True)
+_SESSION_HERMES_HOME = tempfile.mkdtemp(prefix="hermes-test-home-")
+os.environ["HERMES_HOME"] = _SESSION_HERMES_HOME
+atexit.register(shutil.rmtree, _SESSION_HERMES_HOME, True)
 
 #: HERMES_HOME as it stood when conftest was imported - i.e. before any test
 #: module could import code that configures logging. Recorded so the guard in

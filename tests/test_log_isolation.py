@@ -20,6 +20,8 @@ guards the property so a refactor cannot quietly undo it.
 
 import logging
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -63,6 +65,30 @@ def _all_file_destinations() -> list[str]:
 
 
 class TestLogIsolation:
+    def test_explicit_hermes_home_is_replaced_before_collection(self, tmp_path):
+        """An inherited operator home must never survive conftest import."""
+        inherited_home = tmp_path / "inherited-operator-home"
+        inherited_home.mkdir()
+        observed_path = tmp_path / "observed-home.txt"
+        env = os.environ.copy()
+        env["HERMES_HOME"] = str(inherited_home)
+        env["HERMES_COLLECTION_PROBE_OUTPUT"] = str(observed_path)
+
+        probe = Path(__file__).parent / "fixtures" / "hermes_home_collection_probe.py"
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", str(probe)],
+            cwd=Path(__file__).parent.parent,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        observed = Path(observed_path.read_text(encoding="utf-8")).resolve()
+        assert observed != inherited_home.resolve()
+        assert observed.name.startswith("hermes-test-home-")
+
     def test_hermes_home_is_sandboxed_before_imports(self):
         # Deliberately NOT os.environ: by test time the per-test `_isolate_env`
         # fixture has sandboxed HERMES_HOME, so reading it here would pass even
