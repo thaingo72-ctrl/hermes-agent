@@ -3363,11 +3363,24 @@ async def _dispose_unused_adapter(adapter: "BasePlatformAdapter | None") -> None
 # Max seconds between platform reconnect retries (primary watcher and
 # secondary-profile reconnects share this policy — tune in one place).
 _RECONNECT_BACKOFF_CAP = 300
+_TELEGRAM_RECONNECT_BACKOFF_CAP = 30
 
 
-def _reconnect_backoff(attempt: int) -> int:
-    """Exponential reconnect backoff: 30s, 60s, 120s, ... capped at 5 min."""
-    return min(30 * (2 ** (attempt - 1)), _RECONNECT_BACKOFF_CAP)
+def _reconnect_backoff(attempt: int, *, platform: Platform | None = None) -> int:
+    """Return reconnect delay, keeping Telegram recovery latency bounded.
+
+    Telegram's adapter already spends up to three minutes performing its own
+    bounded retry sequence.  Applying the generic five-minute outer cap after
+    that creates a long blind spot exactly when network reachability returns.
+    Keep Telegram's outer retry at 30 seconds while preserving the existing
+    exponential five-minute cap for every other platform.
+    """
+    cap = (
+        _TELEGRAM_RECONNECT_BACKOFF_CAP
+        if platform is Platform.TELEGRAM
+        else _RECONNECT_BACKOFF_CAP
+    )
+    return min(30 * (2 ** (attempt - 1)), cap)
 
 
 class TurnRunner:
@@ -11824,7 +11837,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             error_code=adapter.fatal_error_code,
                             error_message=adapter.fatal_error_message or "failed to reconnect",
                         )
-                        backoff = _reconnect_backoff(attempt)
+                        backoff = _reconnect_backoff(attempt, platform=platform)
                         info["attempts"] = attempt
                         info["next_retry"] = time.monotonic() + backoff
                         logger.info(
@@ -11862,7 +11875,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         error_code=None,
                         error_message=str(e),
                     )
-                    backoff = _reconnect_backoff(attempt)
+                    backoff = _reconnect_backoff(attempt, platform=platform)
                     info["attempts"] = attempt
                     info["next_retry"] = time.monotonic() + backoff
                     logger.warning(
@@ -12775,7 +12788,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if not self._running:
                     return
                 attempts += 1
-                backoff = _reconnect_backoff(attempts)
+                backoff = _reconnect_backoff(attempts, platform=platform)
                 logger.info(
                     "Secondary %s reconnect retry in %ds (profile: %s)",
                     platform.value,
