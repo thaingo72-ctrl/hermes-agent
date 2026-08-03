@@ -233,9 +233,26 @@ def _is_cron_approval_context() -> bool:
     tests and older entrypoints.
     """
     try:
-        from gateway.session_context import get_session_env
+        from gateway.session_context import _UNSET, _VAR_MAP
 
-        return is_truthy_value(get_session_env("HERMES_CRON_SESSION", ""))
+        cron_value = _VAR_MAP["HERMES_CRON_SESSION"].get()
+        if cron_value is not _UNSET:
+            return is_truthy_value(cron_value)
+
+        # A bound interactive identity is authoritative. Do not let a stale
+        # process-global cron marker from an earlier in-process job reclassify
+        # a live gateway/API/TUI turn. Real cron jobs bind the cron marker first,
+        # so their delivery platform/session identity still remains cron.
+        for name in (
+            "HERMES_SESSION_PLATFORM",
+            "HERMES_SESSION_KEY",
+            "HERMES_UI_SESSION_ID",
+        ):
+            value = _VAR_MAP[name].get()
+            if value is not _UNSET and value:
+                return False
+
+        return env_var_enabled("HERMES_CRON_SESSION")
     except Exception:
         return env_var_enabled("HERMES_CRON_SESSION")
 
@@ -3512,12 +3529,14 @@ def check_all_command_guards(command: str, env_type: str,
     is_cli = _is_interactive_cli()
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
+    is_cron = _is_cron_approval_context()
 
-    # Preserve the existing non-interactive behavior: outside CLI/gateway/ask
-    # flows, we do not block on approvals and we skip external guard work.
-    if not is_cli and not is_gateway and not is_ask:
+    # Cron policy is authoritative even when a process-global interactive/ask
+    # flag leaked from another turn. Outside cron, preserve the existing
+    # non-interactive behavior and skip external guard work.
+    if is_cron or (not is_cli and not is_gateway and not is_ask):
         # Cron sessions: respect cron_mode config
-        if _is_cron_approval_context():
+        if is_cron:
             if _get_cron_approval_mode() == "deny":
                 # Run detection to get a description for the block message
                 is_dangerous, _pk, description = detect_dangerous_command(command)

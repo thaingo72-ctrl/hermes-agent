@@ -97,9 +97,9 @@ def _make_stub_agent(record=None):
 
         def run_conversation(self, user_message, conversation_history=None, task_id=None):
             if record is not None:
-                from tools.approval import _is_cron_session
+                from tools.approval import _is_cron_approval_context
 
-                record["cron_in_job"] = _is_cron_session()
+                record["cron_in_job"] = _is_cron_approval_context()
             return {"final_response": "done", "turn_exit_reason": ""}
 
     return _StubAgent
@@ -158,27 +158,27 @@ def test_marker_is_active_inside_the_cron_job(monkeypatch):
     assert record.get("cron_in_job") is True
 
 
-def test_is_cron_session_prefers_contextvar_then_env(monkeypatch):
+def test_is_cron_approval_context_prefers_contextvar_then_env(monkeypatch):
     from gateway.session_context import _VAR_MAP, _UNSET
-    from tools.approval import _is_cron_session
+    from tools.approval import _is_cron_approval_context
 
     monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
     _VAR_MAP["HERMES_CRON_SESSION"].set(_UNSET)
-    assert _is_cron_session() is False
+    assert _is_cron_approval_context() is False
 
     _VAR_MAP["HERMES_CRON_SESSION"].set("1")
-    assert _is_cron_session() is True
+    assert _is_cron_approval_context() is True
 
     # An explicitly-set empty value is authoritative (no env fallback) and
     # reads as non-cron. This is exactly why run_job must reset() the marker
     # to its pre-job state instead of set(""), see the test below.
     _VAR_MAP["HERMES_CRON_SESSION"].set("")
-    assert _is_cron_session() is False
+    assert _is_cron_approval_context() is False
 
     # os.environ fallback keeps the standalone `hermes cron` process and tests working
     _VAR_MAP["HERMES_CRON_SESSION"].set(_UNSET)
     monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-    assert _is_cron_session() is True
+    assert _is_cron_approval_context() is True
 
 
 def test_env_fallback_survives_a_completed_run_job(monkeypatch):
@@ -193,7 +193,7 @@ def test_env_fallback_survives_a_completed_run_job(monkeypatch):
     skipped, and a dangerous command is auto-approved instead of blocked
     under cron_mode deny.
     """
-    from tools.approval import _is_cron_session
+    from tools.approval import _is_cron_approval_context
 
     _patch_agent_bootstrap(monkeypatch)
     monkeypatch.setattr(run_agent, "AIAgent", _make_stub_agent())
@@ -202,10 +202,10 @@ def test_env_fallback_survives_a_completed_run_job(monkeypatch):
     ok = cron_scheduler.run_job(dict(_JOB))[0]
     assert ok is True
     # The marker is back to its pre-job state, not pinned to an explicit "".
-    assert _is_cron_session() is False
+    assert _is_cron_approval_context() is False
 
     monkeypatch.setenv("HERMES_CRON_SESSION", "1")
-    assert _is_cron_session() is True, (
+    assert _is_cron_approval_context() is True, (
         "env-marked cron read misclassified as non-cron after a completed run_job"
     )
 
@@ -214,18 +214,18 @@ def test_cron_marker_isolated_between_contexts(monkeypatch):
     """A marker set inside one job's context is invisible to a sibling context
     (a concurrent gateway request). This per-context isolation is the fix."""
     from gateway.session_context import _VAR_MAP
-    from tools.approval import _is_cron_session
+    from tools.approval import _is_cron_approval_context
 
     monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
 
     def _job_ctx():
         _VAR_MAP["HERMES_CRON_SESSION"].set("1")
-        return _is_cron_session()
+        return _is_cron_approval_context()
 
     ctx = contextvars.copy_context()
     assert ctx.run(_job_ctx) is True
     # Outside that copied context the marker was never set.
-    assert _is_cron_session() is False
+    assert _is_cron_approval_context() is False
 
 
 def test_two_real_run_jobs_isolate_marker_across_contexts(monkeypatch):
@@ -235,7 +235,7 @@ def test_two_real_run_jobs_isolate_marker_across_contexts(monkeypatch):
     thread. Drives the raw ContextVar isolation through the real run_job path,
     not a synthetic set()."""
     from gateway.session_context import set_session_vars, clear_session_vars
-    from tools.approval import _is_cron_session, _is_gateway_approval_context
+    from tools.approval import _is_cron_approval_context, _is_gateway_approval_context
 
     _patch_agent_bootstrap(monkeypatch)
     monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
@@ -247,7 +247,7 @@ def test_two_real_run_jobs_isolate_marker_across_contexts(monkeypatch):
     ok_a = ctx_a.run(lambda: cron_scheduler.run_job(dict(_JOB))[0])
     assert ok_a is True and rec_a.get("cron_in_job") is True
     # A's marker never escaped into the base context.
-    assert _is_cron_session() is False
+    assert _is_cron_approval_context() is False
 
     # A concurrent interactive gateway session (base context) stays gateway.
     tokens = set_session_vars(platform="telegram", chat_id="c1", chat_name="Chat")
@@ -262,7 +262,7 @@ def test_two_real_run_jobs_isolate_marker_across_contexts(monkeypatch):
     ctx_b = contextvars.copy_context()
     ok_b = ctx_b.run(lambda: cron_scheduler.run_job({**_JOB, "id": "j2"})[0])
     assert ok_b is True and rec_b.get("cron_in_job") is True
-    assert _is_cron_session() is False
+    assert _is_cron_approval_context() is False
 
 
 def test_marker_cleared_even_when_agent_raises(monkeypatch):
@@ -270,7 +270,7 @@ def test_marker_cleared_even_when_agent_raises(monkeypatch):
     via run_job's finally. A raise mid-tick must not leave the contextvar set
     on a reused loop-thread context (or in os.environ).
     """
-    from tools.approval import _is_cron_session
+    from tools.approval import _is_cron_approval_context
 
     class _RaisingAgent(run_agent.AIAgent):
         def __init__(self, *args, **kwargs):
@@ -293,7 +293,7 @@ def test_marker_cleared_even_when_agent_raises(monkeypatch):
 
     assert success is False
     assert error and "simulated agent crash" in error
-    assert _is_cron_session() is False
+    assert _is_cron_approval_context() is False
     assert os.environ.get("HERMES_CRON_SESSION") is None
 
 
@@ -307,7 +307,7 @@ def test_stale_process_env_does_not_reclassify_bound_gateway_session(monkeypatch
     """
     from gateway.session_context import set_session_vars, clear_session_vars
     from tools.approval import (
-        _is_cron_session,
+        _is_cron_approval_context,
         _is_gateway_approval_context,
         check_dangerous_command,
     )
@@ -317,7 +317,7 @@ def test_stale_process_env_does_not_reclassify_bound_gateway_session(monkeypatch
 
     tokens = set_session_vars(platform="telegram", chat_id="c1", chat_name="Chat")
     try:
-        assert _is_cron_session() is False
+        assert _is_cron_approval_context() is False
         assert _is_gateway_approval_context() is True
         result = check_dangerous_command("rm -rf /tmp/stuff", "local")
         msg = (result.get("message") or "").lower()
