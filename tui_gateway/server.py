@@ -9350,17 +9350,12 @@ def _record_bound_platform_delivery(session: dict, content: Any) -> None:
                 platform = str(row.get("source") or "")
                 chat_id = str(row.get("chat_id") or "")
                 thread_id = row.get("thread_id")
-                # Stable per-turn message ref: the last persisted assistant
-                # row id (distinguishes turns in one session, like the
-                # gateway's inbound message id).
-                message_ref = ""
-                try:
-                    for m in reversed(db.get_messages(key, limit=100)):
-                        if m.get("role") == "assistant" and m.get("id"):
-                            message_ref = str(m["id"])
-                            break
-                except Exception:
-                    message_ref = ""
+                # Stable per-turn message ref: query newest-first directly.
+                # ``get_messages(..., limit=100)`` returns the OLDEST page and
+                # can select a stale assistant row on long sessions.
+                message_ref = str(
+                    db.get_latest_message_id(key, role="assistant") or ""
+                )
         # Only gateway-bound sessions carry a gateway session_key
         # (``agent:...:<platform>:...``) plus a real chat id.
         if not gateway_key or not gateway_key.startswith("agent:"):
@@ -9368,7 +9363,11 @@ def _record_bound_platform_delivery(session: dict, content: Any) -> None:
         if not platform or not chat_id:
             return
         if not message_ref:
-            message_ref = f"desktop:{int(time.time())}"
+            logger.warning(
+                "[tui_gateway] bound delivery has no persisted assistant id for %s",
+                key,
+            )
+            return
         obligation_id = compute_obligation_id(
             gateway_key, message_ref, text
         )
@@ -9906,17 +9905,14 @@ def _run_prompt_submit(
                     (result.get("error") if isinstance(result, dict) else "") or raw
                 )
                 payload["recoverable"] = True
-            _retire_turn_marker(session, marker_key)
-            _emit("message.complete", sid, payload)
-
-            # A reply generated on a session bound to a gateway platform
-            # (e.g. Telegram) must still reach that chat.  The desktop/TUI
-            # backend runs the agent in THIS process — the gateway never sees
-            # the turn, so no delivery obligation would be created and the
-            # reply would stay desktop-only (#76767).  Record an external
-            # obligation the gateway's delivery sweep claims and sends.
+            # Record before the completion frame: once the desktop client sees
+            # message.complete it may detach/exit immediately. The durable row
+            # must already exist at that acknowledgement boundary.
             if status == "complete" and isinstance(raw, str) and raw.strip():
                 _record_bound_platform_delivery(session, raw)
+
+            _retire_turn_marker(session, marker_key)
+            _emit("message.complete", sid, payload)
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge

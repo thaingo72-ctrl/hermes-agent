@@ -192,6 +192,15 @@ class TestPrune:
         assert _row("ob-1") is None
 
 
+def test_rerecord_delivered_obligation_does_not_reset_to_pending():
+    _record()
+    dl.mark_delivered("ob-1")
+
+    _record()
+
+    assert _row("ob-1")["state"] == "delivered"
+
+
 class TestLedgerEnabled:
     def test_default_on(self):
         assert dl.ledger_enabled({}) is True
@@ -202,12 +211,12 @@ class TestGatewayRedeliverySweep:
     """Drive the real GatewayRunner._redeliver_pending_obligations."""
 
     @staticmethod
-    def _runner(adapter=None):
+    def _runner(adapter=None, platform=None):
         from gateway.config import Platform
         from gateway.run import GatewayRunner
 
         runner = object.__new__(GatewayRunner)
-        runner.adapters = {Platform.SLACK: adapter} if adapter else {}
+        runner.adapters = {platform or Platform.SLACK: adapter} if adapter else {}
         _store = MagicMock()
         _store.clear_resume_pending = AsyncMock()
         _store._store = None
@@ -292,7 +301,9 @@ class TestGatewayRedeliverySweep:
             external_owner=True,
         )
         adapter = self._adapter()
-        runner = self._runner(adapter)
+        from gateway.config import Platform
+
+        runner = self._runner(adapter, platform=Platform.TELEGRAM)
 
         n = await runner._redeliver_pending_obligations()
 

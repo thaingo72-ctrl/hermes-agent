@@ -62,6 +62,11 @@ if not os.environ.get("HERMES_HOME"):
     _SESSION_HERMES_HOME = tempfile.mkdtemp(prefix="hermes-test-home-")
     os.environ["HERMES_HOME"] = _SESSION_HERMES_HOME
     atexit.register(shutil.rmtree, _SESSION_HERMES_HOME, True)
+else:
+    _SESSION_HERMES_HOME = os.environ["HERMES_HOME"]
+os.environ["HERMES_TEST_SANDBOX"] = "1"
+os.environ["HERMES_TEST_SANDBOX_HOME"] = _SESSION_HERMES_HOME
+# Durable marker for child processes
 
 #: HERMES_HOME as it stood when conftest was imported - i.e. before any test
 #: module could import code that configures logging. Recorded so the guard in
