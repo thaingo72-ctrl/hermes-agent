@@ -1992,10 +1992,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 self._conn = _connect_tracked_db(
                     str(self.db_path),
                     check_same_thread=False,
-                    # Short timeout — application-level retry with random
-                    # jitter handles contention instead of sitting in
-                    # SQLite's internal busy handler for up to 30s.
-                    timeout=1.0,
+                    # Very short timeout — application-level retry with random
+                    # jitter owns the total patience budget. A longer SQLite
+                    # busy handler can reset its wait during lock promotion and
+                    # silently outlive that deadline.
+                    timeout=0.1,
                     # auto-starts transactions on DML, which conflicts with
                     # our explicit BEGIN IMMEDIATE.  None = we manage
                     # transactions ourselves.
