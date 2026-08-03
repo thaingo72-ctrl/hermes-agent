@@ -143,6 +143,38 @@ async def test_polling_conflict_retries_before_fatal(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_conflict_retry_progress_does_not_reset_retry_ladder(monkeypatch):
+    """One transient successful poll is not durable conflict recovery."""
+    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
+    adapter.set_fatal_error_handler(AsyncMock())
+    adapter._drain_polling_connections = AsyncMock()
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    calls = {"n": 0}
+
+    async def fake_start_polling(**_kwargs):
+        calls["n"] += 1
+        adapter._record_polling_progress(adapter._polling_generation)
+
+    updater = SimpleNamespace(
+        start_polling=AsyncMock(side_effect=fake_start_polling),
+        stop=AsyncMock(),
+        running=True,
+    )
+    adapter._app = SimpleNamespace(updater=updater)
+
+    conflict = type("Conflict", (Exception,), {})
+    await adapter._handle_polling_conflict(
+        conflict("Conflict: terminated by other getUpdates request")
+    )
+
+    assert calls["n"] == 1
+    assert adapter._polling_conflict_count == 1
+    assert adapter._polling_conflict_recovery_generation is None
+    assert adapter._send_path_degraded is False
+
+
+@pytest.mark.asyncio
 async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
     """After exhausting retries, the conflict should become fatal."""
     adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
@@ -492,6 +524,19 @@ def _build_polling_app(monkeypatch, adapter):
     )
     monkeypatch.setattr("asyncio.sleep", AsyncMock())
     return captured
+
+
+@pytest.mark.asyncio
+async def test_cold_connect_preserves_pending_updates(monkeypatch):
+    """A process restart must not discard messages queued while Hermes was down."""
+    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
+    captured = _build_polling_app(monkeypatch, adapter)
+
+    ok = await adapter.connect()
+
+    assert ok is True
+    assert captured["drop_pending_updates"] is False
+    await _cancel_heartbeat(adapter)
 
 
 @pytest.mark.asyncio

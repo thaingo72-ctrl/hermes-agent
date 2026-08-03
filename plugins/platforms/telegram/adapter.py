@@ -770,6 +770,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._drop_delayed_deliveries = False
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
+        self._polling_conflict_recovery_generation: Optional[int] = None
         self._polling_network_error_count: int = 0
         self._polling_generation: int = 0
         self._polling_progress_event = asyncio.Event()
@@ -2160,7 +2161,15 @@ class TelegramAdapter(BasePlatformAdapter):
             return
         self._polling_progress_event.set()
         self._polling_network_error_count = 0
-        self._polling_conflict_count = 0
+        if generation == getattr(
+            self, "_polling_conflict_recovery_generation", None
+        ):
+            # The first successful request after a 409 retry only proves that
+            # this generation reached Telegram; the previous server-side poll
+            # can still conflict again. Preserve the ladder for one generation.
+            self._polling_conflict_recovery_generation = None
+        else:
+            self._polling_conflict_count = 0
         self._send_path_degraded = False
 
     def _observe_polling_request_result(self, request, generation, result):
@@ -3118,9 +3127,11 @@ class TelegramAdapter(BasePlatformAdapter):
             # AttributeError deep inside start_polling instead of failing fast
             # here, where the except below reschedules or escalates to fatal.
             app = self._app
+            expected_generation = self._polling_generation + 1
             try:
                 if not app:
                     raise RuntimeError("Telegram application was torn down during conflict reconnect")
+                self._polling_conflict_recovery_generation = expected_generation
                 await self._start_polling_once(
                     app,
                     drop_pending_updates=False,
@@ -3133,8 +3144,12 @@ class TelegramAdapter(BasePlatformAdapter):
                 )
                 return
             except _PollingLifecycleAbort:
+                if self._polling_conflict_recovery_generation == expected_generation:
+                    self._polling_conflict_recovery_generation = None
                 return
             except Exception as retry_err:
+                if self._polling_conflict_recovery_generation == expected_generation:
+                    self._polling_conflict_recovery_generation = None
                 if getattr(self, "_polling_teardown_started", False):
                     return
                 logger.warning(
@@ -3651,13 +3666,12 @@ class TelegramAdapter(BasePlatformAdapter):
         instead.  Webhook mode is useful for cloud deployments (Fly.io,
         Railway) where inbound HTTP can wake a suspended machine.
 
-        ``is_reconnect`` distinguishes a cold first boot (False — drop any
-        stale Bot API queue) from a watcher reconnect after a prolonged
-        outage (True — preserve the updates Telegram queued while the bot
-        was offline, otherwise every message sent during the outage is
-        silently lost). The in-process network-error ladder and the
-        409-conflict handler already pass ``drop_pending_updates=False``
-        for the same reason; bootstrap follows suit on the reconnect path.
+        ``is_reconnect`` controls strict readiness/cleanup behavior, but both
+        cold starts and watcher reconnects preserve Telegram's Bot API queue.
+        A process restart is itself downtime, so dropping the queue on the
+        cold path silently loses every message sent before polling resumed.
+        Stale server-side poll sessions are handled by the bounded 409 conflict
+        ladder rather than by deleting user updates.
 
         Env vars for webhook mode::
 
@@ -4075,11 +4089,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     webhook_url=webhook_url,
                     secret_token=webhook_secret,
                     allowed_updates=Update.ALL_TYPES,
-                    # Webhooks are push-based — Telegram does not hold a
-                    # server-side getUpdates queue, so this flag is a no-op
-                    # in practice. Mirror the polling path's reconnect
-                    # semantics for consistency.
-                    drop_pending_updates=not is_reconnect,
+                    # Never delete pending updates during process startup.
+                    drop_pending_updates=False,
                 )
                 self._webhook_mode = True
                 self._polling_progress_accepting = False
@@ -4133,10 +4144,10 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._polling_error_callback_ref = _polling_error_callback
 
                 polling_started = await self._start_polling_resilient(
-                    # On a cold first boot drop the stale Bot API queue; on a
-                    # watcher reconnect after an outage preserve it so messages
-                    # sent while the bot was offline are delivered (#46621).
-                    drop_pending_updates=not is_reconnect,
+                    # Preserve messages queued during all downtime, including
+                    # a full process restart. The conflict handler deals with
+                    # stale server-side getUpdates sessions without deletion.
+                    drop_pending_updates=False,
                     error_callback=_polling_error_callback,
                     require_progress=not is_reconnect,
                 )
