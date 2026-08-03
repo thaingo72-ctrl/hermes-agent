@@ -13,6 +13,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import stat
 import sys
 import tempfile
 import time
@@ -242,6 +243,18 @@ def _should_skip_backup_file(abs_path: Path, rel_path: Path, out_path: Path) -> 
     # write can copy data from outside HERMES_HOME.
     if abs_path.is_symlink():
         return True
+
+    # Runtime Unix sockets/FIFOs/devices cannot be represented as restorable
+    # zip entries. Treat them as intentional exclusions rather than attempting
+    # zipfile.write(), which raises and misleadingly marks an otherwise sound
+    # backup incomplete. lstat() avoids following a link that races the check.
+    try:
+        if not stat.S_ISREG(abs_path.lstat().st_mode):
+            return True
+    except OSError:
+        # Let the normal write path report a disappeared/unreadable regular
+        # file as an incomplete backup; only proven non-regular files skip.
+        pass
 
     try:
         return abs_path.resolve() == out_path.resolve()

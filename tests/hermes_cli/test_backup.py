@@ -2,7 +2,9 @@
 
 import json
 import os
+import shutil
 import sqlite3
+import tempfile
 import zipfile
 from argparse import Namespace
 from pathlib import Path
@@ -464,6 +466,41 @@ class TestValidation:
 # ---------------------------------------------------------------------------
 
 class TestBackupEdgeCases:
+
+    def test_unix_socket_is_intentionally_skipped(
+        self, tmp_path, monkeypatch, capsys, request
+    ):
+        """Runtime sockets are non-restorable artifacts, not backup failures."""
+        import socket
+
+        if not hasattr(socket, "AF_UNIX"):
+            pytest.skip("Unix sockets are unavailable")
+
+        # Darwin limits AF_UNIX paths to roughly 104 bytes; pytest's normal
+        # nested tmp_path exceeds that on macOS.
+        hermes_home = Path(tempfile.mkdtemp(prefix="hb-", dir="/tmp"))
+        request.addfinalizer(lambda: shutil.rmtree(hermes_home, ignore_errors=True))
+        (hermes_home / "config.yaml").write_text("model: test\n")
+        socket_path = hermes_home / "runtime.sock"
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(str(socket_path))
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        out_zip = tmp_path / "out.zip"
+
+        try:
+            from hermes_cli.backup import run_backup
+
+            run_backup(Namespace(output=str(out_zip)))
+        finally:
+            listener.close()
+
+        assert out_zip.exists()
+        with zipfile.ZipFile(out_zip) as zf:
+            assert "config.yaml" in zf.namelist()
+            assert "runtime.sock" not in zf.namelist()
+        assert "incomplete" not in capsys.readouterr().out.lower()
 
 
     def test_empty_hermes_home(self, tmp_path, monkeypatch):
