@@ -76,7 +76,7 @@ def _hermes_home_from_env() -> Path:
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:
         return Path(val)
-    if _TEST_SANDBOX_HOME:
+    if _TEST_SANDBOX_HOME and os.environ.get("HERMES_TEST_SANDBOX") == "1":
         return Path(_TEST_SANDBOX_HOME)
     return _get_platform_default_hermes_home()
 
