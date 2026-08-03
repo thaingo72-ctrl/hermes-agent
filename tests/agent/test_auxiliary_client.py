@@ -3187,7 +3187,12 @@ class TestCodexAuxiliaryAdapterTimeout:
                 timeout=0.05,
             )
 
-        assert len(emitted_events) <= 1
+        # The iterator records an event immediately before yielding it. The
+        # deadline is checked by the consumer callback after that yield, so the
+        # first event past the 50 ms boundary may already have been produced.
+        # The contract is bounded termination—not preventing that in-flight
+        # yield from completing.
+        assert len(emitted_events) <= 2
         assert time.monotonic() - started < 0.5
 
 
