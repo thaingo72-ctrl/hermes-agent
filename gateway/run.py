@@ -20158,7 +20158,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             adapter = self.adapters.get(platform)
 
             if not adapter and chat_id:
-                # The update finished, but the target platform has not
+                platform_config = self.config.platforms.get(platform)
+                if not platform_config or not platform_config.enabled:
+                    logger.warning(
+                        "Update notification discarded: %s platform is not configured",
+                        platform_str,
+                    )
+                    return True
+
+                # The update finished, but the configured target platform has not
                 # reconnected yet (common right after the restart that
                 # `hermes update` triggers). Treating "adapter missing" as a
                 # definitive skip would delete the markers and silently lose the
