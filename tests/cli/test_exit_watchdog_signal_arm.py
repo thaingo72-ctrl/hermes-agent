@@ -84,6 +84,7 @@ def test_sigterm_on_wedged_process_forces_exit_within_leash():
     # _arm_exit_watchdog refuses to arm under pytest (it would kill the test
     # worker); the subprocess must look like a real CLI.
     env.pop("PYTEST_CURRENT_TEST", None)
+    env.pop("HERMES_TEST_SANDBOX", None)
     src = _WEDGE_SRC.format(repo=_REPO_ROOT)
     p = subprocess.Popen(
         [sys.executable, "-c", src],
