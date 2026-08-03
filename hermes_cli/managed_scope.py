@@ -46,7 +46,10 @@ def _under_pytest() -> bool:
     that exercise managed scope set ``HERMES_MANAGED_DIR`` explicitly, which is
     still honored (the override path below runs before this guard takes effect).
     """
-    return "PYTEST_CURRENT_TEST" in os.environ
+    return (
+        "PYTEST_CURRENT_TEST" in os.environ
+        or os.environ.get("HERMES_TEST_SANDBOX") == "1"
+    )
 
 
 def get_managed_dir() -> Optional[Path]:

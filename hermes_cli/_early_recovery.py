@@ -182,7 +182,10 @@ def _pytest_owns_live_checkout(root: Path) -> bool:
     running test suite. Tests that sandbox ``project_root`` to a tmp_path are
     unaffected (same posture as ``managed_scope._under_pytest``)."""
     return (
-        "PYTEST_CURRENT_TEST" in os.environ
+        (
+            "PYTEST_CURRENT_TEST" in os.environ
+            or os.environ.get("HERMES_TEST_SANDBOX") == "1"
+        )
         and root == Path(__file__).resolve().parent.parent
     )
 

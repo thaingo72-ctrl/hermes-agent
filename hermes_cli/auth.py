@@ -909,7 +909,7 @@ def _auth_file_path() -> Path:
     # tests that forgot to monkeypatch HERMES_HOME, tests invoked without the
     # hermetic conftest, or sandbox escapes via threads/subprocesses. In
     # production (no PYTEST_CURRENT_TEST) this is a single dict lookup.
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    if (os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("HERMES_TEST_SANDBOX") == "1"):
         real_home_auth = (Path.home() / ".hermes" / "auth.json").resolve(strict=False)
         try:
             resolved = path.resolve(strict=False)
@@ -974,7 +974,7 @@ def _load_global_auth_store() -> Dict[str, Any]:
     global_path = _global_auth_file_path()
     if global_path is None or not global_path.exists():
         return {}
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    if (os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("HERMES_TEST_SANDBOX") == "1"):
         real_home_env = os.environ.get("HOME", "")
         if real_home_env:
             real_root = Path(real_home_env) / ".hermes" / "auth.json"
@@ -4453,7 +4453,7 @@ def _write_through_xai_oauth_to_global_root(state: Dict[str, Any]) -> None:
     # ~/.hermes/auth.json even when HERMES_HOME points at a profile path
     # (mirrors the read-side guard in _load_global_auth_store). Uses the
     # unmodified HOME env, not Path.home() which fixtures may monkeypatch.
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    if (os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("HERMES_TEST_SANDBOX") == "1"):
         real_home_env = os.environ.get("HOME", "")
         if real_home_env:
             real_root = Path(real_home_env) / ".hermes" / "auth.json"
@@ -5184,7 +5184,7 @@ def _nous_shared_store_path() -> Path:
     # does not do this automatically — mirror the _auth_file_path() guard
     # so forgetting to set it fails loudly instead of writing to the real
     # shared store).
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    if (os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("HERMES_TEST_SANDBOX") == "1"):
         from hermes_constants import get_default_hermes_root
         real_home_shared = (
             get_default_hermes_root() / "shared" / NOUS_SHARED_STORE_FILENAME

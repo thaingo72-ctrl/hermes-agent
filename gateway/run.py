@@ -12567,7 +12567,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     ),
                 }
 
-            if not os.environ.get("PYTEST_CURRENT_TEST"):
+            if not (
+                os.environ.get("PYTEST_CURRENT_TEST")
+                or os.environ.get("HERMES_TEST_SANDBOX") == "1"
+            ):
                 arm_shutdown_watchdog(
                     resolve_shutdown_watchdog_delay(self._restart_drain_timeout),
                     done_event=_watchdog_done,

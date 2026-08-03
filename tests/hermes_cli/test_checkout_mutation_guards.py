@@ -33,8 +33,15 @@ class TestPredicate:
         assert er._pytest_owns_live_checkout(tmp_path) is False
         assert main_mod._pytest_owns_live_checkout(tmp_path) is False
 
+    def test_true_with_persistent_sandbox_marker_only(self, monkeypatch):
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.setenv("HERMES_TEST_SANDBOX", "1")
+        assert er._pytest_owns_live_checkout(CHECKOUT_ROOT) is True
+        assert main_mod._pytest_owns_live_checkout(CHECKOUT_ROOT) is True
+
     def test_false_outside_pytest(self, monkeypatch):
         monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+        monkeypatch.delenv("HERMES_TEST_SANDBOX", raising=False)
         assert er._pytest_owns_live_checkout(CHECKOUT_ROOT) is False
         assert main_mod._pytest_owns_live_checkout(CHECKOUT_ROOT) is False
 

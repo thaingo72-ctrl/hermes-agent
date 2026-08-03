@@ -7655,7 +7655,10 @@ def _pytest_owns_live_checkout(root: Path) -> bool:
     tmp_path and are unaffected (same posture as
     ``managed_scope._under_pytest``)."""
     return (
-        "PYTEST_CURRENT_TEST" in os.environ
+        (
+            "PYTEST_CURRENT_TEST" in os.environ
+            or os.environ.get("HERMES_TEST_SANDBOX") == "1"
+        )
         and root == Path(__file__).resolve().parent.parent
     )
 

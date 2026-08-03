@@ -1092,7 +1092,10 @@ def _arm_exit_watchdog(timeout_s: float | None = None) -> None:
         return
     # Never arm under pytest: tests invoke _run_cleanup() directly and a
     # 30s-delayed os._exit(0) would silently kill the test worker.
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    if (
+        os.environ.get("PYTEST_CURRENT_TEST")
+        or os.environ.get("HERMES_TEST_SANDBOX") == "1"
+    ):
         return
 
     def _watchdog():

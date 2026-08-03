@@ -558,7 +558,7 @@ def _write_through_provider_state_to_global_root(
     # ~/.hermes/auth.json even when HERMES_HOME points at a profile path
     # (mirrors the read-side guard in _load_global_auth_store). Uses the
     # unmodified HOME env, not Path.home() which fixtures may monkeypatch.
-    if os.environ.get("PYTEST_CURRENT_TEST"):
+    if (os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("HERMES_TEST_SANDBOX") == "1"):
         real_home_env = os.environ.get("HOME", "")
         if real_home_env:
             real_root = Path(real_home_env) / ".hermes" / "auth.json"
