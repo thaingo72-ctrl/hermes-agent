@@ -18,8 +18,8 @@ rides out long holds, and exhausted patience raises an error that names
 the real cause instead of reading like disk damage.
 """
 
+import multiprocessing
 import sqlite3
-import threading
 import time
 
 import pytest
@@ -52,10 +52,11 @@ class TestTranscriptWritePatience:
         ~1-2s attempt-counted budget instead of aborting the turn."""
         db.create_session("s1", "cli")
 
-        started = threading.Event()
+        ctx = multiprocessing.get_context("spawn")
+        started = ctx.Event()
         # 3s hold: comfortably beyond the old worst-case retry budget,
         # comfortably inside _TRANSCRIPT_WRITE_PATIENCE_S.
-        holder = threading.Thread(
+        holder = ctx.Process(
             target=_hold_write_lock, args=(db.db_path, 3.0, started)
         )
         holder.start()
@@ -86,8 +87,9 @@ class TestTranscriptWritePatience:
         held by another process — not read like disk/permission damage."""
         monkeypatch.setattr(SessionDB, "_WRITE_PATIENCE_S", 0.2)
 
-        started = threading.Event()
-        holder = threading.Thread(
+        ctx = multiprocessing.get_context("spawn")
+        started = ctx.Event()
+        holder = ctx.Process(
             target=_hold_write_lock, args=(db.db_path, 2.0, started)
         )
         holder.start()
@@ -119,8 +121,9 @@ class TestOpenLockPatience:
         # through the same 1s-timeout connection).
         SessionDB(db_path=db_path).close()
 
-        started = threading.Event()
-        holder = threading.Thread(
+        ctx = multiprocessing.get_context("spawn")
+        started = ctx.Event()
+        holder = ctx.Process(
             target=_hold_write_lock, args=(db_path, 3.0, started)
         )
         holder.start()

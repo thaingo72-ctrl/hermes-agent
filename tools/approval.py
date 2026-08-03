@@ -2181,9 +2181,17 @@ def _is_verification_artifact_cleanup(command: str) -> bool:
         return False
 
     operand = argv[2]
-    temp_dir = os.path.realpath(tempfile.gettempdir())
+    declared_temp_dir = os.path.normpath(tempfile.gettempdir())
+    temp_dir = os.path.realpath(declared_temp_dir)
     basename = os.path.basename(operand)
-    if operand != os.path.join(temp_dir, basename):
+    normalized_operand = os.path.normpath(operand)
+    if normalized_operand != operand:
+        return False
+    operand_parent = os.path.dirname(normalized_operand)
+    allowed_spellings = {temp_dir}
+    if declared_temp_dir == "/tmp" and temp_dir == "/private/tmp":
+        allowed_spellings.add(declared_temp_dir)
+    if operand_parent not in allowed_spellings:
         return False
 
     target = os.path.realpath(operand)

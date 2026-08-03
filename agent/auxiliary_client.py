@@ -1171,6 +1171,7 @@ class _CodexCompletionsAdapter:
         self._model = model
 
     def create(self, **kwargs) -> Any:
+        call_started_at = time.monotonic()
         messages = kwargs.get("messages", [])
         model = kwargs.get("model", self._model)
 
@@ -1348,7 +1349,7 @@ class _CodexCompletionsAdapter:
         tool_calls_raw: List[Any] = []
         usage = None
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
-        deadline = time.monotonic() + float(total_timeout) if total_timeout else None
+        deadline = call_started_at + float(total_timeout) if total_timeout else None
         timed_out = threading.Event()
         timeout_timer: Optional[threading.Timer] = None
         # A protected provider call may outlive its owning compression attempt:
@@ -1440,7 +1441,14 @@ class _CodexCompletionsAdapter:
 
         try:
             if total_timeout:
-                timeout_timer = threading.Timer(float(total_timeout), _close_client_on_timeout)
+                assert deadline is not None
+                remaining_timeout = max(deadline - time.monotonic(), 0.0)
+                if remaining_timeout <= 0:
+                    _close_client_on_timeout()
+                    raise TimeoutError(_timeout_message())
+                timeout_timer = threading.Timer(
+                    remaining_timeout, _close_client_on_timeout
+                )
                 timeout_timer.daemon = True
                 timeout_timer.start()
             _check_cancelled()
