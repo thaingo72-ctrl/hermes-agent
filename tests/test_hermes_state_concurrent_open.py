@@ -85,3 +85,19 @@ def test_concurrent_gateway_cli_desktop_schema_opens_are_consistent(tmp_path):
         assert {item["surface"] for item in metadata} == {"gateway", "cli", "desktop"}
     finally:
         con.close()
+
+
+def test_latest_message_id_reads_newest_row_beyond_first_page(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("long", source="desktop")
+        latest_assistant = None
+        for index in range(105):
+            role = "assistant" if index % 2 else "user"
+            message_id = db.append_message("long", role=role, content=str(index))
+            if role == "assistant":
+                latest_assistant = message_id
+
+        assert db.get_latest_message_id("long", role="assistant") == latest_assistant
+    finally:
+        db.close()

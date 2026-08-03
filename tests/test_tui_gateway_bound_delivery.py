@@ -8,10 +8,10 @@ from gateway import delivery_ledger as dl
 from tui_gateway import server
 
 
-def _session_db(row, messages):
+def _session_db(row, message_id):
     return SimpleNamespace(
         get_session=Mock(return_value=row),
-        get_messages=Mock(return_value=messages),
+        get_latest_message_id=Mock(return_value=message_id),
     )
 
 
@@ -23,7 +23,7 @@ def test_bound_telegram_reply_records_stable_external_obligation(monkeypatch):
             "chat_id": "123",
             "thread_id": None,
         },
-        [{"id": 42, "role": "assistant", "content": "reply from desktop"}],
+        42,
     )
     compute = Mock(return_value="stable-obligation-id")
     record = Mock()
@@ -58,7 +58,7 @@ def test_desktop_only_reply_creates_no_delivery_obligation(monkeypatch):
             "chat_id": None,
             "thread_id": None,
         },
-        [{"id": 7, "role": "assistant", "content": "local reply"}],
+        7,
     )
     record = Mock()
     monkeypatch.setattr(server, "_session_db", lambda _session: nullcontext(db))

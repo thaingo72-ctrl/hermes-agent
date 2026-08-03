@@ -6547,6 +6547,19 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             result.append(msg)
         return result
 
+    def get_latest_message_id(
+        self, session_id: str, *, role: str, include_inactive: bool = False
+    ) -> Optional[int]:
+        """Return the newest matching message id without paginating from the start."""
+        active_clause = "" if include_inactive else " AND active = 1"
+        with self._read_ctx() as conn:
+            row = conn.execute(
+                "SELECT id FROM messages WHERE session_id = ? AND role = ?"
+                f"{active_clause} ORDER BY id DESC LIMIT 1",
+                (session_id, role),
+            ).fetchone()
+        return int(row[0]) if row is not None else None
+
     def get_messages_around(
         self,
         session_id: str,

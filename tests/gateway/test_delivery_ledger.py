@@ -164,6 +164,15 @@ class TestPrune:
         assert _row("ob-1") is None
 
 
+def test_rerecord_delivered_obligation_does_not_reset_to_pending():
+    _record()
+    dl.mark_delivered("ob-1")
+
+    _record()
+
+    assert _row("ob-1")["state"] == "delivered"
+
+
 class TestLedgerEnabled:
     def test_default_on(self):
         assert dl.ledger_enabled({}) is True

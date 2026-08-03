@@ -17,6 +17,11 @@ _UNSET = object()
 _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
     "_HERMES_HOME_OVERRIDE", default=_UNSET
 )
+_TEST_SANDBOX_HOME = (
+    os.environ.get("HERMES_TEST_SANDBOX_HOME", "").strip()
+    if os.environ.get("HERMES_TEST_SANDBOX") == "1"
+    else ""
+)
 
 # ── TUI busy-indicator styles ─────────────────────────────────────────
 # Single source of truth shared by the CLI /indicator command, the TUI
@@ -71,6 +76,8 @@ def _hermes_home_from_env() -> Path:
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:
         return Path(val)
+    if _TEST_SANDBOX_HOME:
+        return Path(_TEST_SANDBOX_HOME)
     return _get_platform_default_hermes_home()
 
 
