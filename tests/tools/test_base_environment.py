@@ -115,25 +115,20 @@ class TestAtomicSnapshotWrite:
         assert f"> '{snap}'" not in wrapped
         assert f"> {snap}\n" not in wrapped
 
-    def test_temp_path_uses_bashpid_not_dollardollar(self):
-        """The temp name MUST use ``$BASHPID`` (the real subshell PID), not
-        ``$$``.  In ``&``-launched concurrent subshells ``$$`` stays the parent
-        shell's PID, so two writers would pick the same temp name, clobber each
-        other mid-write, and mv would publish a torn file — the corruption is
-        only narrowed, not closed.  This is the bug shared by every prior PR in
-        the #38249 cluster."""
+    def test_temp_path_uses_mktemp_not_shell_pid(self):
+        """Bash 3.2 has no $BASHPID; mktemp must own uniqueness."""
         env = _TestableEnv()
         env._snapshot_ready = True
         wrapped = env._wrap_command("echo hi", "/tmp")
-        assert "$BASHPID" in wrapped
-        # The bare $$ temp form must be gone.
-        assert ".tmp.$$" not in wrapped
+        assert "mktemp" in wrapped
+        assert ".tmp.XXXXXX" in wrapped
+        assert "$BASHPID" not in wrapped
 
 
-    def test_init_session_bootstrap_also_atomic_and_bashpid(self):
+    def test_init_session_bootstrap_also_atomic_and_uses_mktemp(self):
         """The init_session bootstrap (first snapshot write) is the same shared
         file a concurrent command could source — it must be atomic and use
-        ``$BASHPID`` too."""
+        collision-safe mktemp naming too."""
         env = _TestableEnv()
         captured = {}
 
@@ -148,8 +143,8 @@ class TestAtomicSnapshotWrite:
             pass
         boot = captured.get("cmd", "")
         assert ".tmp." in boot and "mv -f " in boot, boot
-        assert "$BASHPID" in boot
-        assert ".tmp.$$" not in boot
+        assert "mktemp" in boot and ".tmp.XXXXXX" in boot
+        assert "$BASHPID" not in boot
 
 
     def test_init_session_bootstrap_uses_private_umask(self):
@@ -178,8 +173,8 @@ class TestAtomicSnapshotConcurrencyBehavioral:
     the emitted script's guarantee holds under real concurrency: N concurrent
     writers + readers, and the snapshot is ALWAYS a complete, parseable env
     dump — never truncated mid-line with a ``declare -x`` / ``export`` fragment
-    that would corrupt PATH.  Crucially it uses ``$BASHPID`` (per-subshell
-    unique), which is what closes the race; ``$$`` would still tear here.
+    that would corrupt PATH.  Crucially it uses ``mktemp`` so macOS Bash 3.2
+    and newer shells get the same per-writer uniqueness.
     """
 
     def _run(self, script):
@@ -194,13 +189,15 @@ class TestAtomicSnapshotConcurrencyBehavioral:
         import shlex
         snap = str(tmp_path / "hermes-snap-x.sh")
         _q = shlex.quote
-        _snap_tmp = _q(snap + ".tmp.") + "$BASHPID"
+        _snap_template = _q(snap + ".tmp.XXXXXX")
+        _snap_tmp = '"$__hermes_snap_tmp"'
         # One writer iteration = the exact atomic sequence _wrap_command emits.
         writer = (
             "for i in $(seq 1 80); do "
             "export BIG_$i=$(head -c 600 /dev/zero | tr '\\0' x); "
+            f"if __hermes_snap_tmp=$(mktemp {_snap_template}); then "
             f"{{ export -p > {_snap_tmp} && mv -f {_snap_tmp} {_q(snap)}; }} "
-            f"2>/dev/null || rm -f {_snap_tmp} 2>/dev/null || true; "
+            f"2>/dev/null || rm -f {_snap_tmp} 2>/dev/null || true; fi; "
             "done"
         )
         # Reader: repeatedly source the snapshot and check PATH never absorbs
