@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
 
-from gateway.config import Platform
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent
 from gateway.session import SessionSource
 
@@ -193,7 +193,9 @@ class TestUpdateCommandPlatformGate:
 
 
     @pytest.mark.asyncio
-    async def test_allows_plugin_platform_via_registry_fallback(self, monkeypatch):
+    async def test_allows_plugin_platform_via_registry_fallback(
+        self, monkeypatch, tmp_path
+    ):
         """A plugin-migrated platform (DISCORD) is no longer in
         ``_UPDATE_ALLOWED_PLATFORMS`` but must still pass the gate via
         the registry's ``allow_update_command=True`` flag.
@@ -219,7 +221,7 @@ class TestUpdateCommandPlatformGate:
         event = _make_event(platform=Platform.DISCORD)
         monkeypatch.setenv("HERMES_MANAGED", "")
 
-        with patch("subprocess.Popen"):
+        with patch("gateway.run._hermes_home", tmp_path), patch("subprocess.Popen"):
             result = await runner._handle_update_command(event)
 
         # The gate must NOT have rejected us — anything other than the
@@ -230,7 +232,9 @@ class TestUpdateCommandPlatformGate:
 
 
     @pytest.mark.asyncio
-    async def test_allows_homeassistant_via_registry_fallback(self, monkeypatch):
+    async def test_allows_homeassistant_via_registry_fallback(
+        self, monkeypatch, tmp_path
+    ):
         """Same as DISCORD/MATTERMOST: HOMEASSISTANT is now plugin-migrated
         (PR #40709) and not in the hardcoded frozenset; the registry must
         keep /update working via ``allow_update_command=True``.
@@ -250,7 +254,7 @@ class TestUpdateCommandPlatformGate:
         event = _make_event(platform=Platform.HOMEASSISTANT)
         monkeypatch.setenv("HERMES_MANAGED", "")
 
-        with patch("subprocess.Popen"):
+        with patch("gateway.run._hermes_home", tmp_path), patch("subprocess.Popen"):
             result = await runner._handle_update_command(event)
 
         assert "only available from messaging platforms" not in result
@@ -386,6 +390,11 @@ class TestSendUpdateNotification:
         retry can deliver once the platform is back.
         """
         runner = _make_runner()
+        runner.config = GatewayConfig(
+            platforms={
+                Platform.DISCORD: PlatformConfig(enabled=True, token="test")
+            }
+        )
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
 
@@ -413,6 +422,37 @@ class TestSendUpdateNotification:
         assert exit_code_path.exists()
         # The marker stays in its canonical pending location (claim restored).
         assert not (hermes_home / ".update_pending.claimed.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_platform_discards_completed_notification(self, tmp_path):
+        """Completed updates for platforms that cannot reconnect are cleaned up."""
+        runner = _make_runner()
+        runner.config = GatewayConfig(platforms={})
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+
+        pending_path = hermes_home / ".update_pending.json"
+        output_path = hermes_home / ".update_output.txt"
+        exit_code_path = hermes_home / ".update_exit_code"
+        pending_path.write_text(
+            json.dumps(
+                {
+                    "platform": "homeassistant",
+                    "chat_id": "67890",
+                    "user_id": "12345",
+                }
+            )
+        )
+        output_path.write_text("Done")
+        exit_code_path.write_text("124")
+
+        with patch("gateway.run._hermes_home", hermes_home):
+            result = await runner._send_update_notification()
+
+        assert result is True
+        assert not pending_path.exists()
+        assert not output_path.exists()
+        assert not exit_code_path.exists()
 
 
 # ---------------------------------------------------------------------------
