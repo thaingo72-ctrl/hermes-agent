@@ -56,6 +56,7 @@ _OPENROUTER_PROVIDER_SORT_VALUES = {"throughput", "latency", "price"}
 # billing reasons keep their own 60s cooldown (set above); this is the
 # narrower non-rate-limit case.  See issue #24996.
 _FALLBACK_EXHAUSTED_COOLDOWN_S = 5.0
+_NON_STREAM_STALE_JOIN_TIMEOUT_S = 2.0
 
 
 def _context_thread_target(callback):
@@ -1075,7 +1076,7 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 f"stale non-streaming call killed after {int(_elapsed)}s"
             )
             # Wait briefly for the thread to notice the closed connection.
-            t.join(timeout=2.0)
+            t.join(timeout=_NON_STREAM_STALE_JOIN_TIMEOUT_S)
             if result["error"] is None and result["response"] is None:
                 if _silent_hint:
                     result["error"] = TimeoutError(

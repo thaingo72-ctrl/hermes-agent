@@ -496,7 +496,16 @@ def _run_one_file_once(
     if shutdown_requested.is_set():
         return file, 130, "runner interrupted before file started\n", {}, 0.0
 
-    cmd = [sys.executable, "-m", "pytest", str(file), *pytest_args]
+    base_temp = isolated_hermes_home / "pytest-tmp"
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "--basetemp",
+        str(base_temp),
+        str(file),
+        *pytest_args,
+    ]
     child_env = os.environ.copy()
     child_env["HERMES_HOME"] = str(isolated_hermes_home)
 

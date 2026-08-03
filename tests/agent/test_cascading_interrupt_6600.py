@@ -104,30 +104,35 @@ def _wait_for_mock_call(mock, timeout=3.0):
     raise AssertionError(f"{mock!r} was not called within {timeout}s")
 
 
-def test_anthropic_non_streaming_stale_aborts_request_client_not_shared():
+def test_anthropic_non_streaming_stale_aborts_request_client_not_shared(monkeypatch):
     """Stale non-streaming Anthropic call: the poll thread aborts the
     request-local client's socket; the shared client is never closed/rebuilt,
     and the worker still unblocks and closes its own client (no #28161 hang)."""
     agent = _make_anthropic_agent()
     agent._compute_non_stream_stale_timeout.return_value = 0.05
     agent._codex_silent_hang_hint = MagicMock(return_value=None)
+    monkeypatch.setattr(cch, "_NON_STREAM_STALE_JOIN_TIMEOUT_S", 0.1)
 
     request_client = MagicMock()
     agent._create_request_anthropic_client = MagicMock(return_value=request_client)
     agent._abort_request_anthropic_client = MagicMock()
     agent._close_request_anthropic_client = MagicMock()
+    worker_release = threading.Event()
 
     def _create(_api_kwargs, *, client):
         assert client is request_client
-        # Outlive the 0.05s stale timeout AND the worker join (2.0s) so the
-        # stale detector surfaces its TimeoutError.
-        time.sleep(2.5)
+        # Stay blocked until the stale handler has returned; elapsed sleeps make
+        # this race scheduler-dependent under the full parallel suite.
+        worker_release.wait(timeout=3.0)
         return object()
 
     agent._anthropic_messages_create = MagicMock(side_effect=_create)
 
-    with pytest.raises(TimeoutError):
-        cch.interruptible_api_call(agent, {"model": "x", "messages": []})
+    try:
+        with pytest.raises(TimeoutError):
+            cch.interruptible_api_call(agent, {"model": "x", "messages": []})
+    finally:
+        worker_release.set()
 
     # Shared client untouched from the poll thread.
     agent._anthropic_client.close.assert_not_called()
