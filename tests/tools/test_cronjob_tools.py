@@ -387,6 +387,34 @@ class TestUnifiedCronjobTool:
         stored = get_job(created["job_id"])
         assert stored["deliver"] == "telegram"
 
+    def test_create_and_update_content_success_predicate(self):
+        from cron.jobs import get_job
+
+        policy = {
+            "all_of": ["## Daily Research", "**Bottom line:**"],
+            "none_of": ["collection failed"],
+        }
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Daily briefing",
+                schedule="every 1h",
+                success_predicate=policy,
+            )
+        )
+        assert created["success"] is True
+        stored = get_job(created["job_id"])
+        assert stored is not None
+        assert stored["success_predicate"] == policy
+
+        updated = json.loads(
+            cronjob(action="update", job_id=created["job_id"], success_predicate={})
+        )
+        assert updated["success"] is True
+        stored = get_job(created["job_id"])
+        assert stored is not None
+        assert stored["success_predicate"] is None
+
 
 # =========================================================================
 # Agent-facing surface: per-job model pins are user-owned

@@ -448,6 +448,23 @@ Otherwise, report the issue.
 
 Failed jobs always deliver regardless of the `[SILENT]` marker — only successful runs can be silenced. For quiet monitoring jobs, prompt the agent to reply with only `[SILENT]` when there is nothing to report.
 
+## Deterministic content-success gates
+
+An agent returning text is not always a successful report. For structured recurring reports, set `success_predicate` so the scheduler marks the run failed unless every required marker is present and every forbidden marker is absent:
+
+```python
+cronjob(
+    action="update",
+    job_id="daily-research",
+    success_predicate={
+        "all_of": ["## Daily Research", "**Bottom line:**"],
+        "none_of": ["collection failed", "operational failure"],
+    },
+)
+```
+
+Matching is case-insensitive by default; set `case_sensitive=True` when exact casing is part of the format. A malformed predicate fails closed. A rejected response is recorded as an error and the failure summary is delivered instead of treating failure prose as a green run. Pass an empty object on update to clear the predicate.
+
 ## Script timeout
 
 Pre-run scripts (attached via the `script` parameter) have a default timeout of 3600 seconds (1 hour). This bounds the **script only** — skill-based / LLM-driven jobs run on a separate inactivity budget and are not capped by this value. If your scripts need a different limit, you can change it:

@@ -1287,6 +1287,7 @@ def create_job(
     script: Optional[str] = None,
     context_from: Optional[Union[str, List[str]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
+    success_predicate: Optional[Dict[str, Any]] = None,
     workdir: Optional[str] = None,
     no_agent: bool = False,
     attach_to_session: Optional[bool] = None,
@@ -1321,6 +1322,9 @@ def create_job(
                           When set, only tools from these toolsets are loaded, reducing
                           token overhead. When omitted, all default tools are loaded.
                           Ignored when ``no_agent=True``.
+        success_predicate: Optional deterministic final-response policy. ``all_of``
+                           markers must all be present and ``none_of`` markers
+                           must all be absent before the run is marked successful.
         workdir: Optional absolute path.  When set, the job runs as if launched
                 from that directory: AGENTS.md / CLAUDE.md / .cursorrules from
                 that directory are injected into the system prompt, and the
@@ -1363,6 +1367,7 @@ def create_job(
     normalized_script = normalized_script or None
     normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
     normalized_toolsets = normalized_toolsets or None
+    normalized_success_predicate = dict(success_predicate) if success_predicate is not None else None
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
@@ -1454,6 +1459,7 @@ def create_job(
         "deliver": deliver,
         "origin": origin,  # Tracks where job was created for "origin" delivery
         "enabled_toolsets": normalized_toolsets,
+        "success_predicate": normalized_success_predicate,
         "workdir": normalized_workdir,
     }
     # Only persist attach_to_session when explicitly set, so existing jobs and
@@ -2387,6 +2393,11 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             kind = schedule.get("kind")
 
             next_run_dt = _ensure_aware(raw_next_run_dt)
+            # Python compares two aware datetimes sharing the same ZoneInfo by
+            # wall clock, which is wrong across a DST fold. Compare POSIX
+            # instants for all due/grace decisions instead.
+            next_run_instant = next_run_dt.timestamp()
+            now_instant = now.timestamp()
             # Migration repair: a cron job persists next_run_at as an absolute
             # instant, but the cron expr describes local wall-clock intent. If the
             # configured/system timezone changed after persistence, the stored
@@ -2405,7 +2416,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             if (
                 kind == "cron"
                 and not schedule.get("timezone")
-                and next_run_dt <= now
+                and next_run_instant <= now_instant
                 and _timezone_offset_mismatch(raw_next_run_dt, now)
                 and _stored_wall_clock_is_future(raw_next_run_dt, now)
             ):
@@ -2426,13 +2437,13 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
                             break
                     continue
 
-            if next_run_dt <= now:
+            if next_run_instant <= now_instant:
 
                 # For recurring jobs, check if the scheduled time is stale
                 # (gateway was down and missed the window). Fast-forward to
                 # the next future occurrence instead of firing a stale run.
                 grace = _compute_grace_seconds(schedule)
-                if kind in {"cron", "interval"} and (now - next_run_dt).total_seconds() > grace:
+                if kind in {"cron", "interval"} and now_instant - next_run_instant > grace:
                     # Job is past its catch-up grace window — skip accumulated
                     # missed runs but still execute once now to avoid deferring
                     # indefinitely (e.g. a long-running job just finished).
