@@ -596,6 +596,15 @@ every 1d     → Every day
 0 0 * * 0       → Every Sunday at midnight
 ```
 
+Prefix a 5-field expression with `TZ=<IANA zone>` or `CRON_TZ=<IANA zone>` to keep that job on a specific local wall clock independently of the Hermes or system timezone:
+
+```text
+TZ=Asia/Ho_Chi_Minh 30 6 * * 1-5        → Weekdays at 6:30 AM in Saigon
+CRON_TZ=America/New_York 0 9 * * 1-5     → Weekdays at 9:00 AM in New York
+```
+
+The zone is evaluated for every occurrence, including daylight-saving transitions. Timezone prefixes apply only to cron expressions, not relative delays or intervals.
+
 ### ISO timestamps
 
 ```text

@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - non-Windows
     msvcrt = None
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from hermes_constants import get_hermes_home
 from typing import Optional, Dict, List, Any, Set, Tuple, Union
 
@@ -581,10 +582,21 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     """
     schedule = schedule.strip()
     original = schedule
+    timezone_name = None
+    timezone_match = re.match(r"^(?:CRON_)?TZ=([A-Za-z0-9._+/-]+)\s+(.+)$", schedule)
+    if timezone_match:
+        timezone_name = timezone_match.group(1)
+        try:
+            ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Invalid cron timezone '{timezone_name}'") from exc
+        schedule = timezone_match.group(2).strip()
     schedule_lower = schedule.lower()
     
     # "every X" pattern → recurring interval
     if schedule_lower.startswith("every "):
+        if timezone_name:
+            raise ValueError("Timezone prefixes are only supported for cron expressions")
         duration_str = schedule[6:].strip()
         minutes = parse_duration(duration_str)
         return {
@@ -606,12 +618,18 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
             croniter(schedule)
         except Exception as e:
             raise ValueError(f"Invalid cron expression '{schedule}': {e}")
-        return {
+        result = {
             "kind": "cron",
             "expr": schedule,
-            "display": schedule
+            "display": original,
         }
-    
+        if timezone_name:
+            result["timezone"] = timezone_name
+        return result
+
+    if timezone_name:
+        raise ValueError("Timezone prefixes are only supported for cron expressions")
+
     # ISO timestamp (contains T or looks like date)
     if 'T' in schedule or re.match(r'^\d{4}-\d{2}-\d{2}', schedule):
         try:
@@ -757,6 +775,9 @@ def _compute_grace_seconds(schedule: dict) -> int:
         if expr:
             try:
                 now = _hermes_now()
+                timezone_name = schedule.get("timezone")
+                if timezone_name:
+                    now = now.astimezone(ZoneInfo(timezone_name))
                 cron = croniter(expr, now)
                 first = cron.get_next(datetime)
                 second = cron.get_next(datetime)
@@ -818,12 +839,20 @@ def compute_next_run(schedule: Dict[str, Any], last_run_at: Optional[str] = None
         # with interval jobs.  This ensures that after a crash/restart,
         # the next run is anchored to the actual last execution time
         # rather than to an arbitrary restart time.
-        base_time = now
+        timezone_name = schedule.get("timezone")
+        try:
+            cron_timezone = ZoneInfo(timezone_name) if timezone_name else now.tzinfo
+        except (TypeError, ZoneInfoNotFoundError):
+            logger.warning("Invalid timezone %r in cron schedule", timezone_name)
+            return None
+        base_time = now.astimezone(cron_timezone)
         if last_run_at:
             try:
-                base_time = _ensure_aware(datetime.fromisoformat(last_run_at))
+                base_time = _ensure_aware(datetime.fromisoformat(last_run_at)).astimezone(
+                    cron_timezone
+                )
             except Exception:
-                base_time = now
+                base_time = now.astimezone(cron_timezone)
         cron = croniter(expr, base_time)
         next_run = cron.get_next(datetime)
         return next_run.isoformat()
@@ -2375,6 +2404,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
             # rare relative to the double-fire bug this prevents (#28934).
             if (
                 kind == "cron"
+                and not schedule.get("timezone")
                 and next_run_dt <= now
                 and _timezone_offset_mismatch(raw_next_run_dt, now)
                 and _stored_wall_clock_is_future(raw_next_run_dt, now)
