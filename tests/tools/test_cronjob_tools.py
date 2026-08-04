@@ -405,7 +405,23 @@ class TestUnifiedCronjobTool:
         assert created["success"] is True
         stored = get_job(created["job_id"])
         assert stored is not None
-        assert stored["success_predicate"] == policy
+        assert stored["success_predicate"] == {
+            "all_of": policy["all_of"],
+            "none_of": policy["none_of"],
+            "case_sensitive": False,
+        }
+
+        rejected = json.loads(
+            cronjob(
+                action="update",
+                job_id=created["job_id"],
+                success_predicate=[],  # type: ignore[arg-type]
+            )
+        )
+        assert rejected["success"] is False
+        stored = get_job(created["job_id"])
+        assert stored is not None
+        assert stored["success_predicate"]["all_of"] == policy["all_of"]
 
         updated = json.loads(
             cronjob(action="update", job_id=created["job_id"], success_predicate={})

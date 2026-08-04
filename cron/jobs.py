@@ -1217,6 +1217,41 @@ def _normalize_job_optional_text(value: Any, *, strip_trailing_slash: bool = Fal
     return text or None
 
 
+def _normalize_success_predicate(value: Any) -> Optional[Dict[str, Any]]:
+    """Validate and copy a deterministic content-success predicate.
+
+    ``None`` and an empty object both mean "no predicate". Every other
+    malformed value is rejected before jobs.json can be mutated.
+    """
+    if value is None or value == {}:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("success_predicate must be an object")
+
+    allowed = {"all_of", "none_of", "case_sensitive"}
+    unknown = sorted(str(key) for key in value if key not in allowed)
+    if unknown:
+        raise ValueError(f"success_predicate has unsupported keys: {', '.join(unknown)}")
+
+    all_of = value.get("all_of", [])
+    none_of = value.get("none_of", [])
+    case_sensitive = value.get("case_sensitive", False)
+    if not isinstance(all_of, list) or not isinstance(none_of, list):
+        raise ValueError("success_predicate all_of/none_of must be arrays")
+    if any(not isinstance(marker, str) or not marker for marker in all_of + none_of):
+        raise ValueError("success_predicate markers must be non-empty strings")
+    if not isinstance(case_sensitive, bool):
+        raise ValueError("success_predicate case_sensitive must be boolean")
+    if not all_of and not none_of:
+        raise ValueError("success_predicate must define all_of or none_of")
+
+    return {
+        "all_of": list(all_of),
+        "none_of": list(none_of),
+        "case_sensitive": case_sensitive,
+    }
+
+
 def _compute_provider_model_snapshots(
     *,
     provider: Any,
@@ -1367,7 +1402,7 @@ def create_job(
     normalized_script = normalized_script or None
     normalized_toolsets = [str(t).strip() for t in enabled_toolsets if str(t).strip()] if enabled_toolsets else None
     normalized_toolsets = normalized_toolsets or None
-    normalized_success_predicate = dict(success_predicate) if success_predicate is not None else None
+    normalized_success_predicate = _normalize_success_predicate(success_predicate)
     normalized_workdir = _normalize_workdir(workdir)
     normalized_no_agent = bool(no_agent)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
@@ -1549,6 +1584,10 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
         raise ValueError(
             f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}"
         )
+
+    updates = dict(updates)
+    if "success_predicate" in updates:
+        updates["success_predicate"] = _normalize_success_predicate(updates["success_predicate"])
 
     with _jobs_lock():
         jobs = load_jobs()
