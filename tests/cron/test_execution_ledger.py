@@ -17,7 +17,7 @@ def _point_ledger(monkeypatch, tmp_path):
     return executions
 
 
-def test_cron_suite_autouse_isolates_execution_ledger(tmp_path):
+def test_cron_suite_autouse_isolates_execution_ledger(tmp_path, hermes_home_at_conftest_import):
     """Cron tests must never write claims into the user's live execution DB."""
     import cron.executions as executions
 
@@ -27,6 +27,7 @@ def test_cron_suite_autouse_isolates_execution_ledger(tmp_path):
     ledger = executions.EXECUTIONS_FILE.resolve()
 
     assert os.environ["HERMES_TEST_SANDBOX"] == "1"
+    assert Path(hermes_home_at_conftest_import).resolve() == session_home
     assert ledger != live_ledger
     assert ledger.is_relative_to(session_home) or ledger.is_relative_to(current_home)
 

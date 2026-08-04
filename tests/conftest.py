@@ -61,17 +61,30 @@ _PRE_SANDBOX_HERMES_HOME = os.environ.get("HERMES_HOME", "")
 _inherited_home = os.environ.get("HERMES_TEST_SANDBOX_HOME", "").strip()
 _inherited_path = Path(_inherited_home).expanduser() if _inherited_home else None
 _temp_root = Path(tempfile.gettempdir()).resolve()
+
+
+def _owned_by_current_user(path: Path) -> bool:
+    """Apply the POSIX ownership check where the platform exposes UIDs."""
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return True
+    return getattr(path.stat(), "st_uid", None) == getuid()
+
+
 _inherited_safe = bool(
     os.environ.get("HERMES_TEST_SANDBOX") == "1"
     and _inherited_path
     and _inherited_path.name.startswith("hermes-test-home-")
     and _inherited_path.is_dir()
     and not _inherited_path.is_symlink()
-    and _inherited_path.stat().st_uid == os.getuid()
+    and _owned_by_current_user(_inherited_path)
     and _inherited_path.resolve().is_relative_to(_temp_root)
 )
 if _inherited_safe:
     _SESSION_HERMES_HOME = str(_inherited_path)
+    # HERMES_HOME wins over the sandbox marker in get_hermes_home(). Always
+    # align it with the validated inherited sandbox before collection imports.
+    os.environ["HERMES_HOME"] = _SESSION_HERMES_HOME
 else:
     # Never trust an arbitrary inherited HERMES_HOME: collection-time imports
     # can otherwise bind module constants to live user state.
@@ -89,6 +102,12 @@ os.environ["HERMES_TEST_SANDBOX_HOME"] = _SESSION_HERMES_HOME
 #: `_isolate_env` fixture has sandboxed it by then, so the check would pass
 #: even with this block removed.
 HERMES_HOME_AT_CONFTEST_IMPORT = os.environ.get("HERMES_HOME", "")
+
+
+@pytest.fixture
+def hermes_home_at_conftest_import() -> str:
+    """Expose the collection-time sandbox path without importing conftest."""
+    return HERMES_HOME_AT_CONFTEST_IMPORT
 
 
 # ── Per-file process isolation ──────────────────────────────────────────────
