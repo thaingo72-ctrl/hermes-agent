@@ -58,12 +58,26 @@ if str(PROJECT_ROOT) not in sys.path:
 # would silently stop protecting the operator's actual ~/.hermes (#69385).
 _PRE_SANDBOX_KANBAN_OVERRIDE = os.environ.get("HERMES_KANBAN_HOME", "").strip()
 _PRE_SANDBOX_HERMES_HOME = os.environ.get("HERMES_HOME", "")
-if not os.environ.get("HERMES_HOME"):
+_inherited_home = os.environ.get("HERMES_TEST_SANDBOX_HOME", "").strip()
+_inherited_path = Path(_inherited_home).expanduser() if _inherited_home else None
+_temp_root = Path(tempfile.gettempdir()).resolve()
+_inherited_safe = bool(
+    os.environ.get("HERMES_TEST_SANDBOX") == "1"
+    and _inherited_path
+    and _inherited_path.name.startswith("hermes-test-home-")
+    and _inherited_path.is_dir()
+    and not _inherited_path.is_symlink()
+    and _inherited_path.stat().st_uid == os.getuid()
+    and _inherited_path.resolve().is_relative_to(_temp_root)
+)
+if _inherited_safe:
+    _SESSION_HERMES_HOME = str(_inherited_path)
+else:
+    # Never trust an arbitrary inherited HERMES_HOME: collection-time imports
+    # can otherwise bind module constants to live user state.
     _SESSION_HERMES_HOME = tempfile.mkdtemp(prefix="hermes-test-home-")
     os.environ["HERMES_HOME"] = _SESSION_HERMES_HOME
     atexit.register(shutil.rmtree, _SESSION_HERMES_HOME, True)
-else:
-    _SESSION_HERMES_HOME = os.environ["HERMES_HOME"]
 os.environ["HERMES_TEST_SANDBOX"] = "1"
 os.environ["HERMES_TEST_SANDBOX_HOME"] = _SESSION_HERMES_HOME
 # Durable marker for child processes

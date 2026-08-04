@@ -17,6 +17,21 @@ def _point_ledger(monkeypatch, tmp_path):
     return executions
 
 
+def test_cron_suite_autouse_isolates_execution_ledger(tmp_path):
+    """Cron tests must never write claims into the user's live execution DB."""
+    import cron.executions as executions
+
+    sandbox_home = Path(os.environ["HERMES_TEST_SANDBOX_HOME"]).resolve()
+    assert executions.EXECUTIONS_FILE.resolve().is_relative_to(sandbox_home)
+    assert executions.EXECUTIONS_FILE.name == "executions.db"
+
+    import cron.scheduler as scheduler
+
+    scheduler_ledger = Path(scheduler.create_execution.__globals__["EXECUTIONS_FILE"]).resolve()
+    assert scheduler_ledger.is_relative_to(sandbox_home)
+
+
+
 def test_execution_transitions_are_durable(monkeypatch, tmp_path):
     executions = _point_ledger(monkeypatch, tmp_path)
 
