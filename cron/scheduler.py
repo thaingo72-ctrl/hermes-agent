@@ -318,6 +318,51 @@ def _is_cron_silence_response(text: str) -> bool:
 
     return is_autonomous_silence_response(text)
 
+
+def _content_success_error(job: dict[str, Any], text: str) -> Optional[str]:
+    """Validate an optional deterministic content-success policy.
+
+    Agent completion is not semantic success. Jobs that publish structured
+    reports can require all expected markers and reject known failure markers;
+    malformed policies fail closed. Matching is case-insensitive by default.
+    """
+    policy = job.get("success_predicate")
+    if policy is None:
+        return None
+    if not isinstance(policy, dict):
+        return "Content success predicate failed: policy must be an object"
+
+    allowed = {"all_of", "none_of", "case_sensitive"}
+    unknown = sorted(str(key) for key in policy if key not in allowed)
+    if unknown:
+        return f"Content success predicate failed: unsupported keys: {', '.join(unknown)}"
+
+    required = policy.get("all_of", [])
+    forbidden = policy.get("none_of", [])
+    if not isinstance(required, list) or not isinstance(forbidden, list):
+        return "Content success predicate failed: all_of and none_of must be lists"
+    if not required and not forbidden:
+        return "Content success predicate failed: policy must define all_of or none_of"
+    if any(not isinstance(value, str) or not value for value in required + forbidden):
+        return "Content success predicate failed: markers must be non-empty strings"
+
+    case_sensitive = policy.get("case_sensitive", False)
+    if not isinstance(case_sensitive, bool):
+        return "Content success predicate failed: case_sensitive must be a boolean"
+    normalize = (lambda value: value) if case_sensitive else str.casefold
+    haystack = normalize(text)
+    missing = [value for value in required if normalize(value) not in haystack]
+    rejected = [value for value in forbidden if normalize(value) in haystack]
+    reasons = []
+    if missing:
+        reasons.append("missing required markers: " + ", ".join(repr(value) for value in missing))
+    if rejected:
+        reasons.append("matched forbidden markers: " + ", ".join(repr(value) for value in rejected))
+    if reasons:
+        return "Content success predicate failed: " + "; ".join(reasons)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Persistent thread pool for parallel cron jobs.
 # The tick function submits jobs here and returns immediately so the ticker
@@ -3996,6 +4041,17 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
                     "Interrupted by gateway shutdown before the run finished "
                     "(tool subprocess was killed mid-flight)."
                 )
+
+            if success:
+                predicate_error = _content_success_error(job, final_response or "")
+                if predicate_error:
+                    success = False
+                    error = predicate_error
+                    logger.error(
+                        "Job '%s' failed content-success validation: %s",
+                        job["id"],
+                        predicate_error,
+                    )
 
             # Deliver the final response to the origin/target chat.
             # If the agent responded with [SILENT], skip delivery (but

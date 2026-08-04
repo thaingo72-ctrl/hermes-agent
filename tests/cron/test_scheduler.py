@@ -947,6 +947,56 @@ class TestSilentDelivery:
             tick(verbose=False)
         deliver_mock.assert_called_once()
 
+    def test_content_success_predicate_rejects_failure_prose(self):
+        job = self._make_job()
+        job["success_predicate"] = {
+            "all_of": ["## Daily Research", "**Bottom line:**"],
+            "none_of": ["collection failed", "operational failure"],
+        }
+        response = "Collection Failed: operational failure; no brief was produced."
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", response, None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._summarize_cron_failure_for_delivery", return_value="Brief validation failed."), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run") as mark_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        mark_mock.assert_called_once()
+        assert mark_mock.call_args.args[1] is False
+        assert "content success predicate failed" in mark_mock.call_args.args[2].lower()
+        deliver_mock.assert_called_once()
+        assert deliver_mock.call_args.args[0]["id"] == job["id"]
+        assert deliver_mock.call_args.args[1] == "Brief validation failed."
+
+    def test_content_success_predicate_accepts_matching_report(self):
+        job = self._make_job()
+        job["success_predicate"] = {
+            "all_of": ["## Daily Research", "**Bottom line:**"],
+            "none_of": ["collection failed"],
+        }
+        response = "## Daily Research\n\n**Bottom line:** No qualifying changes."
+        with patch("cron.scheduler.get_due_jobs", return_value=[job]), \
+             patch("cron.scheduler.run_job", return_value=(True, "# output", response, None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result", return_value=None) as deliver_mock, \
+             patch("cron.scheduler.mark_job_run") as mark_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+
+        mark_mock.assert_called_once_with("monitor-job", True, None, delivery_error=None)
+        deliver_mock.assert_called_once()
+        assert deliver_mock.call_args.args[0]["id"] == job["id"]
+        assert deliver_mock.call_args.args[1] == response
+
+    def test_content_success_predicate_malformed_policy_fails_closed(self):
+        from cron.scheduler import _content_success_error
+
+        job = {"success_predicate": {1: ["bad"]}}
+        error = _content_success_error(job, "report")
+        assert error is not None
+        assert "unsupported keys" in error
 
     def test_whitespace_only_response_is_marked_failed_not_delivered(self):
         """Whitespace-only final responses should behave like empty responses."""
